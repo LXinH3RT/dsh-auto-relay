@@ -69,8 +69,16 @@ Profiles implement compression differently, and both shapes are recognised:
 ## Install
 
 ```sh
-dsh plugin install /path/to/dsh-auto-relay
+dsh plugin add /path/to/dsh-auto-relay
 ```
+
+Or straight from this repository (a `git:` dependency; the `file:` form above is for a local checkout):
+
+```sh
+dsh plugin add git+https://github.com/LXinH3RT/dsh-auto-relay.git
+```
+
+After a schema change the settings panel picks it up only when the plugin is disabled and enabled again — touching the source files does not reload the plugin.
 
 ## Tests
 

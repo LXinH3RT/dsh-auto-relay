@@ -69,8 +69,16 @@ When a conversation keeps compressing near its context limit, open a continuatio
 ## 安装
 
 ```sh
-dsh plugin install /path/to/dsh-auto-relay
+dsh plugin add /path/to/dsh-auto-relay
 ```
+
+也可以直接从本仓库安装（`git:` 形式；上面的 `file:` 写法用于本地检出）：
+
+```sh
+dsh plugin add git+https://github.com/LXinH3RT/dsh-auto-relay.git
+```
+
+配置 schema 变更后，需要在插件页把本插件禁用再启用，设置面板才会读到新字段——改动源文件不会触发重载。
 
 ## 测试
 
