@@ -1,0 +1,17 @@
+# This bundle layer inserts dsh-auto-relay process-wide, so every session in
+# this profile is watched for repeated high-occupancy compactions and is handed
+# a continuation session when the configured count is reached.
+#
+# The entry `name:` is PATH-RELATIVE on purpose. DSH anchors a relative `name:`
+# to the directory of the patch file that declared it
+# (`anchorInsertedPluginNames`), so this row always loads this bundle's own
+# `index.js` — whatever the package folder happens to be called. A bare package
+# name would instead have to match the installed folder name. Keep it relative.
+#
+# No `config:` block here: this layer only carries the plugin's own defaults.
+# Tune it from the profile patch (`- id: dsh-auto-relay` / `config:`) or from
+# the plugin's settings panel.
+
+- insert:
+    - id: dsh-auto-relay
+      name: './index.js'

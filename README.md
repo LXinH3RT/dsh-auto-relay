@@ -1,0 +1,93 @@
+# dsh-auto-relay
+
+Open a continuation session automatically when a conversation keeps compressing near its context limit, and increment the session title's trailing number.
+
+中文说明见 [README.zh.md](./README.zh.md).
+
+## The problem
+
+When a conversation approaches its context limit, compression fires repeatedly: each one replaces finished dialogue with a summary, and the summaries themselves occupy context. By the Nth compression little room is left, so staying in that session means compressing even more often and answering with progressively less material.
+
+Once compression has happened N times in a row *while occupancy was high*, this plugin opens a session with a clean context and continues the work there. The new session reads the predecessor's conclusions instead of redoing what was already finished.
+
+## When it fires
+
+The plugin watches the session log for compression markers and reads the occupancy percentage **at the moment a compression starts** — the same number the conversation meter shows (`projectedTokens ?? pressureTokens` over `contextWindow`, rounded, capped at 100%).
+
+- A compression at **≥ the threshold** counts;
+- a compression **below** it resets the run to zero;
+- a **failed** compression neither counts nor resets;
+- an **unmeasurable** one (no usage sample or window yet) neither counts nor resets;
+- reaching the configured streak opens the continuation session.
+
+The counters live in the running process by default and start from zero after a restart. Turn on `persistCounter` to write them to local storage (domain `auto_relay`, table `counters`, one record per session) so a restart resumes the run instead of restarting it; records untouched for 30 days are pruned when the store opens. With the switch off nothing is read from or written to disk.
+
+## Settings
+
+Every field is editable in the plugin settings panel and takes effect without a restart:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `enabled` | `true` | Master switch |
+| `thresholdPercent` | `50` | Occupancy percentage a compression must reach to count (1–100) |
+| `consecutiveCount` | `5` | Compressions in a row before handing off (1–50) |
+| `incrementTitle` | `true` | Continue the title's trailing number |
+| `separator` | `-` | Separator before that number, as in `test-3` |
+| `delaySeconds` | `1` | Delay before the task is delivered (1–3600) |
+| `defaultTitle` | `自动接力` | Title used when the current one carries no number |
+| `promptTemplate` | see below | Prompt delivered to the continuation session |
+| `ignoreSubagents` | `true` | Ignore subagent sessions |
+| `oncePerSession` | `true` | At most one hand-off per session |
+| `compressTools` | `compress,mcp__bili__compress` | Tool names that count as a compression |
+| `persistCounter` | `false` | Write counters to local storage so a restart resumes them |
+
+`promptTemplate` preserves newlines and accepts `{sessionId}`, `{count}`, `{percent}`, `{threshold}` and `{title}`; unknown placeholders stay literal.
+
+Headless deployments can tune an install with `DSH_AUTO_RELAY_ENABLED`, `_THRESHOLD_PERCENT`, `_CONSECUTIVE_COUNT`, `_INCREMENT_TITLE`, `_SEPARATOR`, `_DELAY_SECONDS`, `_IGNORE_SUBAGENTS`, `_ONCE_PER_SESSION`, `_COMPRESS_TOOLS` and `_PERSIST_COUNTER`.
+
+## Title increment
+
+When the current title ends in a separator followed by digits, the continuation uses the same stem and the next number: `test-3` → `test-4`, `build_6` → `build_7`. Leading zeroes survive (`test-007` → `test-008`) so sorting still works. A title whose number is not trailing (`report-3-final`) is left alone; a title without a number falls back to `defaultTitle`.
+
+## Hand-off timing
+
+Compression usually happens mid-turn. To keep two sessions from editing the same files at once, the continuation task is created when the **current turn closes** — or immediately when the session is idle. A failed creation (no scheduling service, for example) is not silently dropped: the earned hand-off is kept and retried at the next turn boundary.
+
+## Which compressions count
+
+Profiles implement compression differently, and both shapes are recognised:
+
+- **DSH's own compaction**: `compaction/start` and `compaction/end` events;
+- **profiles that implement compression as a model-driven tool call** (billion-context, for example): a tool call named `compress` and its result, where a result starting with `[Compressed` is a success and one starting with `[Compression FAILED`, `[Compression refused` or `[Compression no-op`, or marked as an error, is a failure. Rename the tool with `compressTools`.
+
+## Compatibility
+
+- Host-only plugin with no client UI; its settings reach the plugin settings panel through the configuration schema.
+- Optional dependency on `@deepseek-ai/schemastery`: without it the plugin runs on its defaults and the panel offers no switches (the log says so).
+- Without the scheduling service (`schedule`) the hand-off cannot be created (one warning, retried later); without the title service (`sessionTitle`) the title falls back to `defaultTitle`.
+
+## Install
+
+```sh
+dsh plugin install /path/to/dsh-auto-relay
+```
+
+## Tests
+
+```sh
+node --test test/smoke.mjs test/mount.mjs test/compress-events.mjs test/persist.mjs
+```
+
+`scripts/replay.mjs` feeds real session logs through the plugin itself, to check that detection still matches the current profile:
+
+```sh
+node scripts/replay.mjs --limit 3 --threshold 50
+```
+
+## Privacy
+
+Both scripts read session logs from the local DSH directory (`$USERPROFILE/.dsh/sessions`, or `$HOME`); nothing leaves the machine and no log content is written into the repository. The replay output prints session ids and percentages only — review it before pasting anywhere.
+
+## License
+
+MIT

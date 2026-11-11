@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="auto relay">
+  <title>auto relay</title>
+  <!-- Left bubble: a conversation that has been squeezed down to a few lines. -->
+  <g fill="none" stroke="#247bbf" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M8 12h22a4 4 0 0 1 4 4v14a4 4 0 0 1-4 4H18l-8 7v-7H8a4 4 0 0 1-4-4V16a4 4 0 0 1 4-4Z"/>
+    <path d="M12 20h14M12 27h9"/>
+  </g>
+  <!-- The hand-off: a short arrow carrying the work to the successor. -->
+  <g fill="none" stroke="#6c7a89" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M36 25h10"/>
+    <path d="m42 20 5 5-5 5"/>
+  </g>
+  <!-- Right bubble: the fresh session, empty enough to keep going. -->
+  <g fill="none" stroke="#247bbf" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 34h28a4 4 0 0 1 4 4v10a4 4 0 0 1-4 4h-6v7l-8-7H20a4 4 0 0 1-4-4V38a4 4 0 0 1 4-4Z" opacity="0.85"/>
+    <path d="M24 42h12"/>
+  </g>
+  <!-- The count: four ticks that stand for a run of consecutive compressions. -->
+  <g fill="#f0b429">
+    <circle cx="46" cy="43" r="2.4"/>
+    <circle cx="52" cy="43" r="2.4"/>
+    <circle cx="46" cy="49" r="2.4"/>
+    <circle cx="52" cy="49" r="2.4"/>
+  </g>
+</svg>
