@@ -211,6 +211,26 @@ test('a custom separator and title are used', async () => {
   stub.dispose()
 })
 
+test('an unnumbered title starts a series at 1 with the configured separator', async () => {
+  const stub = stubContext({ percent: 62, title: 'test' })
+  apply(stub.ctx, { consecutiveCount: 1, separator: '-' })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(stub.created[0].title, 'test-1', 'test → test-1')
+  stub.dispose()
+})
+
+test('an unnumbered title uses the custom separator when starting its series', async () => {
+  const stub = stubContext({ percent: 62, title: 'test' })
+  apply(stub.ctx, { consecutiveCount: 1, separator: '_' })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(stub.created[0].title, 'test_1', 'the connector is the user setting, not a hard-coded dash')
+  stub.dispose()
+})
+
 test('incrementTitle off falls back to the default title', async () => {
   // Turning the rule off must not keep numbering: the point of the switch is to
   // stop deriving a title from the predecessor at all.
@@ -220,6 +240,16 @@ test('incrementTitle off falls back to the default title', async () => {
   stub.emit('session/event', session, end('c1'))
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(stub.created[0].title, '接力')
+  stub.dispose()
+})
+
+test('incrementTitle off also suppresses the fresh-series rule', async () => {
+  const stub = stubContext({ percent: 62, title: 'test' })
+  apply(stub.ctx, { consecutiveCount: 1, incrementTitle: false, defaultTitle: '接力' })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(stub.created[0].title, '接力', 'the switch disables all title derivation')
   stub.dispose()
 })
 

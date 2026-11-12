@@ -31,10 +31,10 @@ When a conversation keeps compressing near its context limit, open a continuatio
 | `enabled` | `true` | 总开关 |
 | `thresholdPercent` | `50` | 计入连续次数的占用百分比（1–100） |
 | `consecutiveCount` | `5` | 连续多少次达标压缩后开启接力（1–50） |
-| `incrementTitle` | `true` | 新会话标题是否沿用序号并加一 |
-| `separator` | `-` | 序号前的连接符，如 `test-3` 的 `-` |
+| `incrementTitle` | `true` | 新会话标题是否沿用序号并加一；标题不含序号时从 1 开始编号 |
+| `separator` | `-` | 序号前的连接符，如 `test-3` 的 `-`；也用于给无序号标题追加序号 1 |
 | `delaySeconds` | `1` | 接力任务的投递延时（1–3600 秒） |
-| `defaultTitle` | `自动接力` | 当前标题不含序号时使用的标题 |
+| `defaultTitle` | `自动接力` | 当前会话没有标题（或关闭标题递增）时使用的标题 |
 | `promptTemplate` | 见下 | 投递给接力会话的提示词 |
 | `ignoreSubagents` | `true` | 忽略子智能体会话 |
 | `oncePerSession` | `true` | 每个会话最多接力一次 |
@@ -47,7 +47,9 @@ When a conversation keeps compressing near its context limit, open a continuatio
 
 ## 标题递增
 
-当前会话标题以"连接符 + 数字"结尾时，新会话使用"同一个 stem + 序号加一"：`test-3` → `test-4`，`build_6` → `build_7`。前导零保留（`test-007` → `test-008`），便于排序。`report-3-final` 这种序号不在末尾的标题不会被改动；标题不含序号时使用 `defaultTitle`。
+当前会话标题以"连接符 + 数字"结尾时，新会话使用"同一个 stem + 序号加一"：`test-3` → `test-4`，`build_6` → `build_7`（连接符设为 `_` 时）。前导零保留（`test-007` → `test-008`），便于排序。
+
+标题**不含**这种尾部序号时，不会原样复用，也不会退回默认标题，而是用同一个连接符从 1 开始编号：`test` → `test-1`，连接符设为 `_` 时 `test` → `test_1`。之后 `test-1` 再接力为 `test-2`，整条链读起来是同一份工作的连续片段。`report-3-final` 这类序号不在末尾的标题按"无序号"处理，从 1 另起一条序列；`defaultTitle` 只在当前会话根本没有标题、或关闭了标题递增时使用。连接符留空表示不编号，仅沿用原标题。
 
 ## 接力时机
 

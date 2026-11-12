@@ -31,10 +31,10 @@ Every field is editable in the plugin settings panel and takes effect without a 
 | `enabled` | `true` | Master switch |
 | `thresholdPercent` | `50` | Occupancy percentage a compression must reach to count (1–100) |
 | `consecutiveCount` | `5` | Compressions in a row before handing off (1–50) |
-| `incrementTitle` | `true` | Continue the title's trailing number |
-| `separator` | `-` | Separator before that number, as in `test-3` |
+| `incrementTitle` | `true` | Continue the trailing number; start at 1 when there is none |
+| `separator` | `-` | Separator before that number, as in `test-3`; also used to append `1` |
 | `delaySeconds` | `1` | Delay before the task is delivered (1–3600) |
-| `defaultTitle` | `自动接力` | Title used when the current one carries no number |
+| `defaultTitle` | `自动接力` | Title used when the current one has none (or increment is off) |
 | `promptTemplate` | see below | Prompt delivered to the continuation session |
 | `ignoreSubagents` | `true` | Ignore subagent sessions |
 | `oncePerSession` | `true` | At most one hand-off per session |
@@ -47,7 +47,9 @@ Headless deployments can tune an install with `DSH_AUTO_RELAY_ENABLED`, `_THRESH
 
 ## Title increment
 
-When the current title ends in a separator followed by digits, the continuation uses the same stem and the next number: `test-3` → `test-4`, `build_6` → `build_7`. Leading zeroes survive (`test-007` → `test-008`) so sorting still works. A title whose number is not trailing (`report-3-final`) is left alone; a title without a number falls back to `defaultTitle`.
+When the current title ends in a separator followed by digits, the continuation uses the same stem and the next number: `test-3` → `test-4`, `build_6` → `build_7` (with `_` as the separator). Leading zeroes survive (`test-007` → `test-008`) so sorting still works.
+
+A title **without** such a trailing number is neither copied verbatim nor replaced by the default: the same separator starts a series at 1. `test` → `test-1`, or `test` → `test_1` when the separator is `_`. The next hand-off turns `test-1` into `test-2`, so the chain reads as consecutive parts of one job. A name whose number is not trailing (`report-3-final`) counts as unnumbered and starts its own series. `defaultTitle` applies only when the session has no title at all or `incrementTitle` is off; an empty separator disables numbering and keeps the original title.
 
 ## Hand-off timing
 

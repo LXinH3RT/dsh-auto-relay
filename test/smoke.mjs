@@ -274,23 +274,44 @@ test('unrelated events are ignored', () => {
   assert.equal(watcher.inspect(s.id), undefined, 'no state is created for an unrelated event')
 })
 
-test('nextTitle continues a numbered title', () => {
-  assert.deepEqual(nextTitle('test-3', '-', 'x'), { title: 'test-4', matched: true, from: 3, to: 4 })
-  assert.deepEqual(nextTitle('build-6', '-', 'x'), { title: 'build-7', matched: true, from: 6, to: 7 })
-  assert.deepEqual(nextTitle('task_12', '_', 'x'), { title: 'task_13', matched: true, from: 12, to: 13 })
-  // Zero padding is how the user sorts these, so it survives the increment.
-  assert.deepEqual(nextTitle('test-007', '-', 'x'), { title: 'test-008', matched: true, from: 7, to: 8 })
-  // Outgrowing the padding is fine; widening it is not.
-  assert.equal(nextTitle('test-99', '-', 'x').title, 'test-100')
+test('nextTitle starts a series when the title has no trailing number', () => {
+  // The point of the feature: an unnumbered name must not be copied verbatim —
+  // two sessions would share it — nor replaced by a generic default.
+  assert.deepEqual(nextTitle('test', '-', 'x'), { title: 'test-1', matched: false, started: true, from: null, to: 1 })
+  assert.deepEqual(nextTitle('build_6', '-', 'x'), { title: 'build_6-1', matched: false, started: true, from: null, to: 1 })
+  assert.deepEqual(nextTitle('my_task', '_', 'x'), { title: 'my_task_1', matched: false, started: true, from: null, to: 1 })
+  // The connector is configuration: the same title becomes `test_1` with `_`.
+  assert.equal(nextTitle('test', '_', 'x').title, 'test_1')
+  assert.equal(nextTitle('test', '·', 'x').title, 'test·1')
+  // A multi-character separator works literally (no regex interpretation).
+  assert.equal(nextTitle('test', ' v', 'x').title, 'test v1')
+  // A title already ending in the separator must not get a doubled one.
+  assert.equal(nextTitle('test-', '-', 'x').title, 'test-1')
+  // A number that is not trailing starts a fresh series rather than being guessed.
+  assert.equal(nextTitle('report-3-final', '-', 'x').title, 'report-3-final-1')
+  // A bare separator with no stem has nothing to number.
+  assert.equal(nextTitle('-3', '-', 'x').title, '-3-1')
 })
 
-test('nextTitle leaves titles it cannot continue alone', () => {
-  assert.equal(nextTitle('report-3-final', '-', 'x').title, 'report-3-final', 'the number is not trailing')
-  assert.equal(nextTitle('no-number', '-', 'x').title, 'no-number')
-  assert.equal(nextTitle('-3', '-', 'x').title, '-3', 'no stem to continue')
-  assert.equal(nextTitle('test-3', '', 'x').title, 'test-3', 'an empty separator disables detection')
-  assert.equal(nextTitle('', '-', '自动接力').title, '自动接力', 'a missing title falls back')
+test('nextTitle leaves numbering alone when detection is disabled or the title is empty', () => {
+  // An empty separator disables the whole numbering rule.
+  assert.equal(nextTitle('test-3', '', 'x').title, 'test-3')
+  assert.equal(nextTitle('test', '', 'x').title, 'test')
+  // A missing title still falls back to the configured default.
+  assert.equal(nextTitle('', '-', '自动接力').title, '自动接力')
   assert.equal(nextTitle(undefined, '-', '自动接力').title, '自动接力')
+  // The fallback is also used when the caller suppresses the rule entirely.
+  assert.equal(nextTitle('test', '-', '').title, 'test-1')
+})
+
+test('nextTitle still continues a numbered title', () => {
+  assert.deepEqual(nextTitle('test-3', '-', 'x'), { title: 'test-4', matched: true, started: false, from: 3, to: 4 })
+  assert.deepEqual(nextTitle('build-6', '-', 'x'), { title: 'build-7', matched: true, started: false, from: 6, to: 7 })
+  assert.deepEqual(nextTitle('task_12', '_', 'x'), { title: 'task_13', matched: true, started: false, from: 12, to: 13 })
+  // Zero padding is how the user sorts these, so it survives the increment.
+  assert.deepEqual(nextTitle('test-007', '-', 'x'), { title: 'test-008', matched: true, started: false, from: 7, to: 8 })
+  // Outgrowing the padding is fine; widening it is not.
+  assert.equal(nextTitle('test-99', '-', 'x').title, 'test-100')
   assert.equal(splitNumberedTitle('  test-3  ', '-').title, undefined)
   assert.deepEqual(splitNumberedTitle('  test-3  ', '-'), { stem: '  test', digits: '3', value: 3 })
 })

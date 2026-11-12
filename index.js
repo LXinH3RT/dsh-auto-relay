@@ -137,12 +137,16 @@ function defineConfig(Schema) {
       .volatile(),
     incrementTitle: Schema.boolean()
       .default(DEFAULTS.incrementTitle)
-      .description('新会话标题沿用当前标题的尾部序号并加一（如 test-3 → test-4）。')
+      .description(
+        '新会话标题沿用当前标题的序号并加一；标题不含序号时从 1 开始编号' +
+        '（如 test-3 → test-4、test → test-1）。关闭后使用下方的默认标题。',
+      )
       .volatile(),
     separator: Schema.string()
       .default(DEFAULTS.separator)
       .description(
-        '标题中序号前的连接符，默认为短横线。留空表示不识别序号，仅沿用原标题。',
+        '标题中序号前的连接符，默认为短横线。既用于识别已有序号，也用于给不含序号的标题追加序号 1' +
+        '（如连接符设为 _ 时 test → test_1）。留空表示不编号，仅沿用原标题。',
       )
       .volatile(),
     delaySeconds: Schema.number()
@@ -151,7 +155,7 @@ function defineConfig(Schema) {
       .volatile(),
     defaultTitle: Schema.string()
       .default(DEFAULTS.defaultTitle)
-      .description('当前会话没有标题（或标题不含序号）时，新会话使用的标题。')
+      .description('当前会话没有标题（或关闭标题递增）时，新会话使用的标题。')
       .volatile(),
     promptTemplate: Schema.string()
       .default(DEFAULTS.promptTemplate)

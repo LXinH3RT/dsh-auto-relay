@@ -1,6 +1,6 @@
 {
   "name": "dsh-auto-relay",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Open a continuation session automatically when a conversation keeps compressing near its context limit, and increment the session title's trailing number.",
   "type": "module",
   "main": "index.js",
