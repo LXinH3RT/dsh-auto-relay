@@ -24,7 +24,7 @@ When a conversation keeps compressing near its context limit, open a continuatio
 
 ## 配置
 
-设置面板里全部可改，改动即时生效，无需重启：
+在「设置 → 插件」里找到本插件，打开它的详情页或它那一行，即可编辑下表全部设置；改动即时生效，无需重启。
 
 | 字段 | 默认 | 含义 |
 | --- | --- | --- |
@@ -40,16 +40,28 @@ When a conversation keeps compressing near its context limit, open a continuatio
 | `oncePerSession` | `true` | 每个会话最多接力一次 |
 | `compressTools` | `compress,mcp__bili__compress` | 把压缩实现为工具调用时，哪些工具名算作压缩 |
 | `persistCounter` | `false` | 计数写入本地存储，重启后继续累计 |
+| `switchToRelay` | `true` | 接力会话开始后，把对话界面自动切到新会话 |
+| `archiveOldSession` | `true` | 切到接力会话后，把交出任务的旧会话归档 |
 
-`promptTemplate` 原样保留换行，可用占位符：`{sessionId}`、`{count}`、`{percent}`、`{threshold}`、`{title}`。未识别的占位符保持原样。
+配置页按用途分成四组（触发条件、接力会话、会话标题、计数与识别）。数字框留空表示恢复默认值，超出范围的值在保存时收敛到边界；复选框点击即生效；提示词框原样保留换行。
 
-无界面部署可用环境变量调整：`DSH_AUTO_RELAY_ENABLED`、`_THRESHOLD_PERCENT`、`_CONSECUTIVE_COUNT`、`_INCREMENT_TITLE`、`_SEPARATOR`、`_DELAY_SECONDS`、`_IGNORE_SUBAGENTS`、`_ONCE_PER_SESSION`、`_COMPRESS_TOOLS`、`_PERSIST_COUNTER`。
+`promptTemplate` 原样保留换行，可用占位符：`{sessionId}`、`{count}`、`{percent}`、`{threshold}`、`{title}`。未识别的占位符保持原样。插件在两页开关都打开时，会在提示词末尾追加一行标记（`[dsh-auto-relay] from=… open=1 archive=1`）供浏览器半部分识别；这一行不影响模型理解，也不会出现在两页开关都关闭的场景里。
+
+无界面部署可用环境变量调整：`DSH_AUTO_RELAY_ENABLED`、`_THRESHOLD_PERCENT`、`_CONSECUTIVE_COUNT`、`_INCREMENT_TITLE`、`_SEPARATOR`、`_DELAY_SECONDS`、`_IGNORE_SUBAGENTS`、`_ONCE_PER_SESSION`、`_COMPRESS_TOOLS`、`_PERSIST_COUNTER`、`_SWITCH_TO_RELAY`、`_ARCHIVE_OLD_SESSION`。环境变量只在设置面板没有给出该字段时生效。
 
 ## 标题递增
 
 当前会话标题以"连接符 + 数字"结尾时，新会话使用"同一个 stem + 序号加一"：`test-3` → `test-4`，`build_6` → `build_7`（连接符设为 `_` 时）。前导零保留（`test-007` → `test-008`），便于排序。
 
 标题**不含**这种尾部序号时，不会原样复用，也不会退回默认标题，而是用同一个连接符从 1 开始编号：`test` → `test-1`，连接符设为 `_` 时 `test` → `test_1`。之后 `test-1` 再接力为 `test-2`，整条链读起来是同一份工作的连续片段。`report-3-final` 这类序号不在末尾的标题按"无序号"处理，从 1 另起一条序列；`defaultTitle` 只在当前会话根本没有标题、或关闭了标题递增时使用。连接符留空表示不编号，仅沿用原标题。
+
+形如 `sessionname-2（1）` 的**括号序号**按 DSH 自身 fork 会话的规则原地递增，括号风格（半角/全角）保持不变：`sessionname-2（1）` → `sessionname-2（2）`，`test (1)` → `test (2)`。括号判定先于连接符，因为 `report-3（2）` 属于 `report-3` 的括号序列，而不是短横线序列。前导零同样保留（`build（007）` → `build（008）`）。
+
+## 界面跟随
+
+接力任务投递后，浏览器半部分会把对话界面切到新会话，并把交出任务的旧会话归档（两个开关见「配置」）。顺序固定为先切后归档——归档当前正在查看的会话会清空对话区。
+
+两半部分通过投递的提示词末尾一行标记通信（`[dsh-auto-relay] from=… open=1 archive=1`）：Host 决定何时交接，浏览器决定界面如何变化。不带这行标记的任务（例如你自己建的定时任务）一律不处理。投递时间早于两分钟的接力会被忽略，避免重新打开页面时被很久以前的接力抢走视线。
 
 ## 接力时机
 
@@ -64,9 +76,10 @@ When a conversation keeps compressing near its context limit, open a continuatio
 
 ## 兼容性
 
-- 纯 Host 插件，不带客户端界面，设置项经由配置 schema 投影到插件设置面板。
+- 由两个半部分组成：Host 半部分负责识别压缩、计数与创建接力会话；浏览器半部分（`client.js`）负责在接力投递后切换界面、归档旧会话，并承载配置页面。
 - 可选依赖 `@deepseek-ai/schemastery`；缺失时插件按默认值运行，面板不提供开关（日志会说明）。
 - 定时任务服务（`schedule`）与标题服务（`sessionTitle`）缺失时：前者使接力无法创建（记录一次警告，资格保留待重试），后者使标题回退到 `defaultTitle`。
+- 浏览器缺少设置服务（`configForms`）或插槽服务（`slots`）时，配置页安静地不出现，接力与界面跟随照常工作。iOS 与原生壳不加载浏览器半部分，此时切换与归档也不生效。
 
 ## 安装
 

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { occupancy, createWatcher } from '../lib/watch.js'
-import { nextTitle, splitNumberedTitle } from '../lib/title.js'
+import { nextTitle, splitNumberedTitle, splitParenTitle } from '../lib/title.js'
 import { DEFAULTS, resolveConfig, renderPrompt } from '../lib/config.js'
 
 /** A quiet logger so the suite output stays readable. */
@@ -277,9 +277,9 @@ test('unrelated events are ignored', () => {
 test('nextTitle starts a series when the title has no trailing number', () => {
   // The point of the feature: an unnumbered name must not be copied verbatim —
   // two sessions would share it — nor replaced by a generic default.
-  assert.deepEqual(nextTitle('test', '-', 'x'), { title: 'test-1', matched: false, started: true, from: null, to: 1 })
-  assert.deepEqual(nextTitle('build_6', '-', 'x'), { title: 'build_6-1', matched: false, started: true, from: null, to: 1 })
-  assert.deepEqual(nextTitle('my_task', '_', 'x'), { title: 'my_task_1', matched: false, started: true, from: null, to: 1 })
+  assert.deepEqual(nextTitle('test', '-', 'x'), { title: 'test-1', matched: false, started: true, from: null, to: 1, style: 'separator' })
+  assert.deepEqual(nextTitle('build_6', '-', 'x'), { title: 'build_6-1', matched: false, started: true, from: null, to: 1, style: 'separator' })
+  assert.deepEqual(nextTitle('my_task', '_', 'x'), { title: 'my_task_1', matched: false, started: true, from: null, to: 1, style: 'separator' })
   // The connector is configuration: the same title becomes `test_1` with `_`.
   assert.equal(nextTitle('test', '_', 'x').title, 'test_1')
   assert.equal(nextTitle('test', '·', 'x').title, 'test·1')
@@ -305,15 +305,44 @@ test('nextTitle leaves numbering alone when detection is disabled or the title i
 })
 
 test('nextTitle still continues a numbered title', () => {
-  assert.deepEqual(nextTitle('test-3', '-', 'x'), { title: 'test-4', matched: true, started: false, from: 3, to: 4 })
-  assert.deepEqual(nextTitle('build-6', '-', 'x'), { title: 'build-7', matched: true, started: false, from: 6, to: 7 })
-  assert.deepEqual(nextTitle('task_12', '_', 'x'), { title: 'task_13', matched: true, started: false, from: 12, to: 13 })
+  assert.deepEqual(nextTitle('test-3', '-', 'x'), { title: 'test-4', matched: true, started: false, from: 3, to: 4, style: 'separator' })
+  assert.deepEqual(nextTitle('build-6', '-', 'x'), { title: 'build-7', matched: true, started: false, from: 6, to: 7, style: 'separator' })
+  assert.deepEqual(nextTitle('task_12', '_', 'x'), { title: 'task_13', matched: true, started: false, from: 12, to: 13, style: 'separator' })
   // Zero padding is how the user sorts these, so it survives the increment.
-  assert.deepEqual(nextTitle('test-007', '-', 'x'), { title: 'test-008', matched: true, started: false, from: 7, to: 8 })
+  assert.deepEqual(nextTitle('test-007', '-', 'x'), { title: 'test-008', matched: true, started: false, from: 7, to: 8, style: 'separator' })
   // Outgrowing the padding is fine; widening it is not.
   assert.equal(nextTitle('test-99', '-', 'x').title, 'test-100')
   assert.equal(splitNumberedTitle('  test-3  ', '-').title, undefined)
   assert.deepEqual(splitNumberedTitle('  test-3  ', '-'), { stem: '  test', digits: '3', value: 3 })
+})
+
+test('nextTitle advances a bracketed counter in place', () => {
+  // The reported case: `sessionname-2（1）` belongs to the bracket series of
+  // `sessionname-2`, so the successor is `sessionname-2（2）` — not `-3（1）`,
+  // not `-2（1）-1`, and not `-2（1）(1)`.
+  assert.deepEqual(nextTitle('sessionname-2（1）', '-', 'x'), { title: 'sessionname-2（2）', matched: true, started: false, from: 1, to: 2, style: 'bracket' })
+  // The bracket style of the source is kept in both directions.
+  assert.equal(nextTitle('test (1)', '-', 'x').title, 'test (2)')
+  assert.equal(nextTitle('test（9）', '-', 'x').title, 'test（10）')
+  // A bracketed counter outranks the separator: `report-3（2）` is one series,
+  // and it continues in the brackets rather than growing a `-` suffix.
+  assert.equal(nextTitle('report-3（2）', '-', 'x').title, 'report-3（3）')
+  // Zero padding inside the brackets is preserved, as with separator numbers.
+  assert.equal(nextTitle('build（007）', '-', 'x').title, 'build（008）')
+  // Whitespace between stem and bracket is part of the stem and survives.
+  assert.equal(nextTitle('my task （3）', '-', 'x').title, 'my task （4）')
+  // A bare counter has no name to continue, so the separator rule applies.
+  assert.equal(nextTitle('（3）', '-', 'x').title, '（3）-1')
+  // A bracket that is not a trailing counter is ordinary text.
+  assert.equal(nextTitle('draft (final)', '-', 'x').title, 'draft (final)-1')
+  assert.equal(nextTitle('draft (1) notes', '-', 'x').title, 'draft (1) notes-1')
+  // Unbalanced or non-numeric brackets are not counters either.
+  assert.equal(nextTitle('draft (1', '-', 'x').title, 'draft (1-1')
+  assert.equal(nextTitle('draft (a)', '-', 'x').title, 'draft (a)-1')
+  // Numbering off leaves a bracketed title untouched, brackets included.
+  assert.equal(nextTitle('sessionname-2（1）', '', 'x').title, 'sessionname-2（1）')
+  assert.deepEqual(splitParenTitle('sessionname-2（1）'), { stem: 'sessionname-2', digits: '1', value: 1, open: '（', close: '）' })
+  assert.equal(splitParenTitle('sessionname-2'), null)
 })
 
 test('renderPrompt fills known placeholders and keeps unknown ones', () => {

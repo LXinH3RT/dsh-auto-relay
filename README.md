@@ -24,7 +24,7 @@ The counters live in the running process by default and start from zero after a 
 
 ## Settings
 
-Every field is editable in the plugin settings panel and takes effect without a restart:
+Open **Settings → Plugins**, then open this plugin's page or its row: every field below is editable there and takes effect without a restart.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -40,16 +40,28 @@ Every field is editable in the plugin settings panel and takes effect without a 
 | `oncePerSession` | `true` | At most one hand-off per session |
 | `compressTools` | `compress,mcp__bili__compress` | Tool names that count as a compression |
 | `persistCounter` | `false` | Write counters to local storage so a restart resumes them |
+| `switchToRelay` | `true` | Show the relay session as soon as it starts |
+| `archiveOldSession` | `true` | Archive the session that handed off |
 
-`promptTemplate` preserves newlines and accepts `{sessionId}`, `{count}`, `{percent}`, `{threshold}` and `{title}`; unknown placeholders stay literal.
+The page groups the fields by purpose (when to relay, the continuation session, the title, counting and detection). An emptied number field falls back to the default; an out-of-range value is clamped on save; a checkbox applies at once; the prompt box keeps its newlines.
 
-Headless deployments can tune an install with `DSH_AUTO_RELAY_ENABLED`, `_THRESHOLD_PERCENT`, `_CONSECUTIVE_COUNT`, `_INCREMENT_TITLE`, `_SEPARATOR`, `_DELAY_SECONDS`, `_IGNORE_SUBAGENTS`, `_ONCE_PER_SESSION`, `_COMPRESS_TOOLS` and `_PERSIST_COUNTER`.
+`promptTemplate` preserves newlines and accepts `{sessionId}`, `{count}`, `{percent}`, `{threshold}` and `{title}`; unknown placeholders stay literal. With both follow switches on, the plugin appends one marker line to the delivered prompt (`[dsh-auto-relay] from=… open=1 archive=1`) for the browser half to read; it does not change how the model reads the task, and it is absent when both switches are off.
+
+Headless deployments can tune an install with `DSH_AUTO_RELAY_ENABLED`, `_THRESHOLD_PERCENT`, `_CONSECUTIVE_COUNT`, `_INCREMENT_TITLE`, `_SEPARATOR`, `_DELAY_SECONDS`, `_IGNORE_SUBAGENTS`, `_ONCE_PER_SESSION`, `_COMPRESS_TOOLS`, `_PERSIST_COUNTER`, `_SWITCH_TO_RELAY` and `_ARCHIVE_OLD_SESSION`. A variable applies only where the settings panel has no value for that field.
 
 ## Title increment
 
 When the current title ends in a separator followed by digits, the continuation uses the same stem and the next number: `test-3` → `test-4`, `build_6` → `build_7` (with `_` as the separator). Leading zeroes survive (`test-007` → `test-008`) so sorting still works.
 
 A title **without** such a trailing number is neither copied verbatim nor replaced by the default: the same separator starts a series at 1. `test` → `test-1`, or `test` → `test_1` when the separator is `_`. The next hand-off turns `test-1` into `test-2`, so the chain reads as consecutive parts of one job. A name whose number is not trailing (`report-3-final`) counts as unnumbered and starts its own series. `defaultTitle` applies only when the session has no title at all or `incrementTitle` is off; an empty separator disables numbering and keeps the original title.
+
+A **bracketed** counter such as `sessionname-2（1）` follows DSH's own fork-naming rule and increments in place, keeping the bracket style (ASCII or full width): `sessionname-2（1）` → `sessionname-2（2）`, `test (1)` → `test (2)`. The bracket test runs before the separator test, because `report-3（2）` belongs to `report-3`'s bracket series rather than to its hyphen series. Leading zeroes survive here too (`build（007）` → `build（008）`).
+
+## Following the relay
+
+Once the relay task is delivered, the browser half shows the new session and archives the one that handed off (both switches are in Settings). The order is fixed — show first, archive second — because archiving the session on screen clears the conversation pane.
+
+The two halves communicate through one trailing line in the delivered prompt (`[dsh-auto-relay] from=… open=1 archive=1`): the Host decides when to hand off, the browser decides how the interface moves. A task without that line — one you scheduled yourself, for instance — is never acted on. A delivery older than two minutes is ignored so that reopening the page does not pull the view to an old relay.
 
 ## Hand-off timing
 
@@ -64,9 +76,10 @@ Profiles implement compression differently, and both shapes are recognised:
 
 ## Compatibility
 
-- Host-only plugin with no client UI; its settings reach the plugin settings panel through the configuration schema.
+- Two halves: the Host half owns detection, counting and the hand-off; the browser half (`client.js`) follows the relay into view, archives the session that handed off, and carries the configuration page.
 - Optional dependency on `@deepseek-ai/schemastery`: without it the plugin runs on its defaults and the panel offers no switches (the log says so).
 - Without the scheduling service (`schedule`) the hand-off cannot be created (one warning, retried later); without the title service (`sessionTitle`) the title falls back to `defaultTitle`.
+- A browser without the settings service (`configForms`) or the slot service (`slots`) simply shows no configuration page; the relay and the follow keep working. iOS and native shells load no browser half at all, so neither the follow nor the archive happens there.
 
 ## Install
 

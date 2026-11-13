@@ -1,11 +1,12 @@
 {
   "name": "dsh-auto-relay",
-  "version": "0.3.0",
-  "description": "Open a continuation session automatically when a conversation keeps compressing near its context limit, and increment the session title's trailing number.",
+  "version": "0.5.0",
+  "description": "Open a continuation session automatically when a conversation keeps compressing near its context limit, follow it in the browser, and configure it from the Plugins tab.",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
     "./cordis.patch.yml": "./cordis.patch.yml",
@@ -13,6 +14,7 @@
   },
   "files": [
     "index.js",
+    "client.js",
     "lib",
     "cordis.patch.yml",
     "locale/*.json",
@@ -37,7 +39,7 @@
     "dsh": ">=0.1.7-rc.2"
   },
   "scripts": {
-    "test": "node --test test/smoke.mjs test/mount.mjs test/compress-events.mjs test/persist.mjs",
+    "test": "node --test test/smoke.mjs test/mount.mjs test/compress-events.mjs test/persist.mjs test/client.mjs",
     "replay": "node scripts/replay.mjs"
   },
   "keywords": [
@@ -52,6 +54,17 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-gateway",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-schedule",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-cordis-client-runner"
+      ]
     }
   }
 }

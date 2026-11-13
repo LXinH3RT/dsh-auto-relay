@@ -36,6 +36,7 @@
 
 import { pickSchemaBuilder } from './lib/schema.js'
 import { DEFAULTS, LIMITS, resolveConfig, renderPrompt } from './lib/config.js'
+import { withMarker } from './lib/marker.js'
 import { createStore } from './lib/persist.js'
 import { nextTitle } from './lib/title.js'
 import { createWatcher, occupancy } from './lib/watch.js'
@@ -179,6 +180,19 @@ function defineConfig(Schema) {
         '重启会从零开始——若担心长时间会话在重启后因计数丢失而撑爆上下文，请开启此项。',
       )
       .volatile(),
+    switchToRelay: Schema.boolean()
+      .default(DEFAULTS.switchToRelay)
+      .description(
+        '接力会话开始后，把对话界面自动切换到新会话。关闭时新会话在侧边栏静默开始，由你手动切换。',
+      )
+      .volatile(),
+    archiveOldSession: Schema.boolean()
+      .default(DEFAULTS.archiveOldSession)
+      .description(
+        '切换到接力会话后，把交出任务的旧会话归档，保持会话列表清爽（归档的会话可在侧边栏恢复）。' +
+        '需要上面一项开启；仅开启本项时界面仍会先切到新会话，因为归档当前会话会清空对话区。',
+      )
+      .volatile(),
     compressTools: Schema.string()
       .default(DEFAULTS.compressTools)
       .description(
@@ -301,6 +315,12 @@ export function apply(ctx, settings = {}) {
    * `new_once` reserves the Session id at creation and creates the Session on
    * delivery; the task's own `title` becomes the new session's title, so the
    * computed title is passed here rather than renamed afterwards.
+   *
+   * The prompt also carries the browser half's instructions (see `lib/marker.js`):
+   * whether to show the relay session, whether to archive this one. The Host can
+   * decide those but cannot perform them — moving the visible conversation is a
+   * client-only capability — so the switches travel on the one field both halves
+   * share.
    */
   async function handOff(session, armed, currentTitle) {
     const schedule = ctx.get?.('schedule')
@@ -312,12 +332,18 @@ export function apply(ctx, settings = {}) {
       config.separator,
       config.defaultTitle,
     )
-    const prompt = renderPrompt(config.promptTemplate, {
+    // `archive` implies `open` inside `relayMarker`: archiving the conversation on
+    // screen would blank it, so the successor has to be shown first.
+    const prompt = withMarker(renderPrompt(config.promptTemplate, {
       sessionId: session.id,
       count: armed.count,
       percent: armed.percent,
       threshold: armed.threshold,
       title: title.title,
+    }), {
+      from: session.id,
+      open: config.switchToRelay,
+      archive: config.archiveOldSession,
     })
     const header = session.header ?? {}
     const create = {}

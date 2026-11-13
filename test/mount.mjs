@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { apply } from '../index.js'
+import { parseMarker } from '../lib/marker.js'
 
 /**
  * A context with just enough surface for `apply()`: an event bus, the effect
@@ -374,3 +375,41 @@ test('a live edit to compressTools is picked up without a remount', async () => 
   assert.equal(stub.created.length, 1, 'the new name is recognised')
   stub.dispose()
 })
+
+test('the delivered prompt carries the marker the browser half reads', async () => {
+  const stub = stubContext({ percent: 62 })
+  apply(stub.ctx, { consecutiveCount: 1 })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(stub.created.length, 1)
+  const marker = parseMarker(stub.created[0].prompt)
+  assert.notEqual(marker, null, 'the prompt is recognisably ours')
+  assert.deepEqual(marker, { from: 'session-a', open: true, archive: true }, 'both switches default on')
+  stub.dispose()
+})
+
+test('turning both follow switches off keeps the marker out of the prompt', async () => {
+  const stub = stubContext({ percent: 62 })
+  apply(stub.ctx, { consecutiveCount: 1, switchToRelay: false, archiveOldSession: false })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(stub.created.length, 1, 'the relay still happens')
+  assert.equal(parseMarker(stub.created[0].prompt), null, 'the browser half is told nothing')
+  stub.dispose()
+})
+
+test('archiving alone still asks the browser to show the successor', async () => {
+  // Archiving the conversation on screen blanks the pane, so the Host must never
+  // ask for `archive` without `open`.
+  const stub = stubContext({ percent: 62 })
+  apply(stub.ctx, { consecutiveCount: 1, switchToRelay: false, archiveOldSession: true })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+  const marker = parseMarker(stub.created[0].prompt)
+  assert.deepEqual(marker, { from: 'session-a', open: true, archive: true })
+  stub.dispose()
+})
+
