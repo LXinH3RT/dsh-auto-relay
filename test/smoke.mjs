@@ -355,6 +355,22 @@ test('renderPrompt fills known placeholders and keeps unknown ones', () => {
   assert.equal(renderPrompt('{unknown} {count}', { count: 1 }), '{unknown} 1')
 })
 
+test('the default prompt points at the continuity notice instead of the session log', () => {
+  // The read tools it used to name are not installed in every profile, so the
+  // model improvised: eight to twelve extra tool calls per hand-off hunting for
+  // the session file. The continuity pointer already carries the answer.
+  assert.doesNotMatch(DEFAULTS.promptTemplate, /session_trace|session_event_read/u)
+  assert.match(DEFAULTS.promptTemplate, /接续说明/u, 'it names the notice to read first')
+  assert.match(DEFAULTS.promptTemplate, /工作区当前的状态/u, 'and a fallback when no notice is present')
+  // Every placeholder it mentions still renders.
+  const rendered = renderPrompt(DEFAULTS.promptTemplate, {
+    sessionId: 'session-a', count: 5, percent: 54, threshold: 50, title: 'test-1',
+  })
+  assert.match(rendered, /session-a/u)
+  assert.match(rendered, /第 5 次/u)
+  assert.doesNotMatch(rendered, /\{(sessionId|count|percent|threshold|title)\}/u)
+})
+
 test('resolveConfig clamps and falls back', () => {
   assert.equal(resolveConfig({ thresholdPercent: 200 }, {}).thresholdPercent, DEFAULTS.thresholdPercent)
   assert.equal(resolveConfig({ thresholdPercent: 65 }, {}).thresholdPercent, 65)

@@ -47,6 +47,8 @@ When a conversation keeps compressing near its context limit, open a continuatio
 
 `promptTemplate` 原样保留换行，可用占位符：`{sessionId}`、`{count}`、`{percent}`、`{threshold}`、`{title}`。未识别的占位符保持原样。插件在两页开关都打开时，会在提示词末尾追加一行标记（`[dsh-auto-relay] from=… open=1 archive=1`）供浏览器半部分识别；这一行不影响模型理解，也不会出现在两页开关都关闭的场景里。
 
+默认提示词让新会话**先看会话开头的接续说明**（`dsh-session-continuity` 这类插件会写明上一会话是哪一场，并附上它的结尾或摘要片段），而不是重新翻上一会话的日志。这样定有两个实测依据：翻日志要额外花八到十二次工具调用去找会话文件；而默认提示词原先点名的 `session_trace`、`session_event_read` 这两个工具并不在任何 profile 里都装着，缺了就只能自己想办法解压日志。开头没有接续说明时，提示词退到「看工作区当前状态（未提交的改动、正在改的文件、任务清单）」；两步都不足以判断时改为向用户确认，不凭猜测扩大范围。换成自己的写法直接改这一项即可，占位符照用。
+
 无界面部署可用环境变量调整：`DSH_AUTO_RELAY_ENABLED`、`_THRESHOLD_PERCENT`、`_CONSECUTIVE_COUNT`、`_INCREMENT_TITLE`、`_SEPARATOR`、`_DELAY_SECONDS`、`_IGNORE_SUBAGENTS`、`_ONCE_PER_SESSION`、`_COMPRESS_TOOLS`、`_PERSIST_COUNTER`、`_SWITCH_TO_RELAY`、`_ARCHIVE_OLD_SESSION`。环境变量只在设置面板没有给出该字段时生效。
 
 ## 标题递增

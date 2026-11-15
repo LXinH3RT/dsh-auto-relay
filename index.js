@@ -162,7 +162,9 @@ function defineConfig(Schema) {
       .default(DEFAULTS.promptTemplate)
       .description(
         '投递给接力会话的提示词。原样保留换行；可用占位符：' +
-        '{sessionId}、{count}、{percent}、{threshold}、{title}。',
+        '{sessionId}、{count}、{percent}、{threshold}、{title}。' +
+        '默认提示词先让新会话看开头的接续说明，而不是重新翻上一会话的日志——' +
+        '重建上下文要额外十几次工具调用，接续说明是现成的。',
       )
       .volatile(),
     ignoreSubagents: Schema.boolean()
