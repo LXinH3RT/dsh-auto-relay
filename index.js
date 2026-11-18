@@ -40,6 +40,10 @@ import { withMarker } from './lib/marker.js'
 import { createStore } from './lib/persist.js'
 import { nextTitle } from './lib/title.js'
 import { createWatcher, occupancy } from './lib/watch.js'
+import { preflightModel } from './lib/preflight.js'
+import { drainQueue, readInbox, renderQueue, renderedCount, restoreQueue } from './lib/queue.js'
+import { createConfirm } from './lib/confirm.js'
+import { bindRelayModel, runningSelection, selectionOf } from './lib/model.js'
 
 export const name = 'dsh-auto-relay'
 
@@ -202,6 +206,57 @@ function defineConfig(Schema) {
         '逗号或空格分隔；DSH 自带的 compaction 事件始终被识别，无需在此列出。',
       )
       .volatile(),
+    carryQueue: Schema.boolean()
+      .default(DEFAULTS.carryQueue)
+      .description(
+        '把旧会话里还没处理的排队输入抄录进接力提示词，并从旧队列中移除，避免它们在旧会话里再跑一遍或被直接丢掉。' +
+        '附件（图片、文件）无法传递，会标注为占位说明。',
+      )
+      .volatile(),
+    maxQueueChars: Schema.number()
+      .default(DEFAULTS.maxQueueChars)
+      .description('排队输入随提示词传递的最大字符数，0 表示不限制。超出部分不传，并在提示词里注明还有剩余。')
+      .volatile(),
+    maxQueueItems: Schema.number()
+      .default(DEFAULTS.maxQueueItems)
+      .description('最多传递多少条排队输入。超出的留在旧会话里，不会被移除。')
+      .volatile(),
+    checkRelayModel: Schema.boolean()
+      .default(DEFAULTS.checkRelayModel)
+      .description(
+        '接力前先确认新会话要用的模型在当前配置里能解析。模型名失效时跳过本次接力并告警，' +
+        '而不是开出一个第一轮就报错的新会话。探测不出结果时照常接力。',
+      )
+      .volatile(),
+    relayTimeoutSeconds: Schema.number()
+      .default(DEFAULTS.relayTimeoutSeconds)
+      .description(
+        '接力会话在这段时间内完全没有任何动静就发出警告（不会自动回滚）。仅用于提示，静默不视为失败。',
+      )
+      .volatile(),
+    relayProvider: Schema.string()
+      .default(DEFAULTS.relayProvider)
+      .description(
+        '指定接力会话使用的提供方，与下一项配合生效。留空表示沿用**上一会话正在使用的**提供方——' +
+        '接力要接着做同一件事，就该跑在做这件事的模型上，而不是 profile 里的机器级默认模型。' +
+        '接力任务本身无法携带模型，因此这里填好后会在新会话出现时把它固定上去。',
+      )
+      .volatile(),
+    relayModel: Schema.string()
+      .default(DEFAULTS.relayModel)
+      .description(
+        '指定接力会话使用的模型名，需与上一项同时填写。留空表示沿用上一会话正在使用的模型名。' +
+        '只有你想让接力换一条路由时才需要填；profile 默认模型若指向一个已被下线或未启用的模型，' +
+        '沿用上一会话的写法不会把那个失效的名字带进新会话。',
+      )
+      .volatile(),
+    relayReasoningEffort: Schema.string()
+      .default(DEFAULTS.relayReasoningEffort)
+      .description(
+        '与上面两项配合的推理强度（如 low、high、max）。留空表示沿用上一会话正在使用的强度；' +
+        '上一会话没有强度时使用该模型自己的默认值。',
+      )
+      .volatile(),
   }).description('dsh-auto-relay：连续在上下文高占用时触发压缩后，自动开启新会话接力未完成的任务。')
 }
 
@@ -329,20 +384,44 @@ export function apply(ctx, settings = {}) {
     if (schedule === undefined || typeof schedule.create !== 'function') {
       throw new Error('schedule 服务不可用，无法创建接力会话')
     }
+    // Which route the successor should run on. A configured pair wins; otherwise
+    // the session's own route is inherited, because "continue this work" means
+    // continuing it on the model that was doing the work — the profile default is
+    // a machine-wide setting that a picker selection never touches.
+    const pinned = selectionOf(config.relayProvider, config.relayModel, config.relayReasoningEffort)
+      ?? runningSelection(session)
+    // Ask before creating anything: a continuation whose model cannot resolve
+    // dies on its first call, and that failure is far more expensive than this
+    // one lookup (see `lib/preflight.js`).
+    const check = await preflightModel(ctx, session, { enabled: config.checkRelayModel, selection: pinned })
+    if (!check.ok) {
+      throw new Error(`接力被跳过：${check.reason ?? '模型不可用'}`)
+    }
     const title = nextTitle(
       config.incrementTitle ? currentTitle : undefined,
       config.separator,
       config.defaultTitle,
     )
-    // `archive` implies `open` inside `relayMarker`: archiving the conversation on
-    // screen would blank it, so the successor has to be shown first.
-    const prompt = withMarker(renderPrompt(config.promptTemplate, {
+    // Whatever the user typed while the session was working travels with the
+    // work. Rendering it here (before the reservation) is what makes the prompt
+    // complete; draining it happens only after the reservation succeeds.
+    const pending = config.carryQueue ? readInbox(ctx.get?.('agents')?.get?.(session.id)) : { nextTurn: [], nextStep: [], total: 0 }
+    const queueBlock = config.carryQueue
+      ? renderQueue(pending, { maxChars: config.maxQueueChars, maxItems: config.maxQueueItems })
+      : ''
+    const carryCount = config.carryQueue
+      ? renderedCount(pending, { maxChars: config.maxQueueChars, maxItems: config.maxQueueItems })
+      : 0
+    const body = renderPrompt(config.promptTemplate, {
       sessionId: session.id,
       count: armed.count,
       percent: armed.percent,
       threshold: armed.threshold,
       title: title.title,
-    }), {
+    })
+    // `archive` implies `open` inside `relayMarker`: archiving the conversation on
+    // screen would blank it, so the successor has to be shown first.
+    const prompt = withMarker(queueBlock === '' ? body : `${body}\n\n${queueBlock}`, {
       from: session.id,
       open: config.switchToRelay,
       archive: config.archiveOldSession,
@@ -358,8 +437,79 @@ export function apply(ctx, settings = {}) {
       timing: { kind: 'after', after_seconds: config.delaySeconds },
       target: { kind: 'new_once', create },
     })
-    return { sessionId: entry?.target?.sessionId, title: entry?.record?.title ?? title.title }
+    const sessionId = entry?.target?.sessionId
+    const resolvedTitle = entry?.record?.title ?? title.title
+
+    // The successor is reserved, so the hand-off is real — only now may the old
+    // queue be emptied. Doing it earlier would lose the user's words whenever
+    // the reservation failed, which is the failure actually observed here.
+    let drained = []
+    if (carryCount > 0) {
+      try {
+        drained = drainQueue(ctx.get?.('agents')?.get?.(session.id), pending, carryCount)
+      } catch (error) {
+        warnOnce(`dsh-auto-relay: 移出排队输入失败，它们会留在上一会话 — ${String(error?.message ?? error)}`)
+      }
+    }
+
+    // Watch the successor until it proves it can run. The bookkeeping lives in
+    // `lib/confirm.js`; the recovery below is what this mount can actually do.
+    if (typeof sessionId === 'string' && sessionId !== '') {
+      confirm.track({
+        parentId: session.id,
+        childId: sessionId,
+        title: resolvedTitle,
+        count: armed.count,
+        drained,
+      })
+      // The reservation cannot carry a model, so the inherited (or pinned) route
+      // is applied as soon as the delivery creates the session. This runs
+      // detached: waiting for a session that may take a minute to appear must not
+      // hold up the hand-off.
+      if (pinned !== null) {
+        void bindRelayModel(ctx, sessionId, pinned, { log, warn: warnOnce }).catch((error) => {
+          warnOnce(`dsh-auto-relay: 为接力会话指定模型失败 — ${String(error?.message ?? error)}`)
+        })
+      }
+    }
+
+    return { sessionId, title: resolvedTitle, carried: drained.length, queueTotal: pending.total }
   }
+
+  /**
+   * React to a continuation that failed before doing any work.
+   *
+   * The old session is the only place the task still exists, so it is brought
+   * back into view (it may already have been archived by the browser half) and
+   * the queued input that travelled with the prompt is handed back to it. Both
+   * steps are best-effort: this runs from an event listener, and a throwing
+   * recovery must not take the plugin down.
+   */
+  function recoverFromFailedRelay(record) {
+    const registry = ctx.get?.('workspaceRegistry')
+    if (registry !== undefined && typeof registry.unarchiveSession === 'function' && typeof record.parentId === 'string') {
+      Promise.resolve(registry.unarchiveSession(record.parentId)).catch((error) => {
+        warnOnce(`dsh-auto-relay: 恢复上一会话 ${record.parentId} 失败 — ${String(error?.message ?? error)}`)
+      })
+    }
+    const parent = ctx.get?.('agents')?.get?.(record.parentId)
+    if (parent !== undefined && Array.isArray(record.drained) && record.drained.length > 0) {
+      const restored = restoreQueue(parent, record.drained)
+      if (restored > 0) {
+        warn(`dsh-auto-relay: 已把 ${restored} 条排队输入放回上一会话 ${record.parentId}，它会继续处理`)
+      }
+    }
+  }
+
+  const confirm = createConfirm({
+    warn,
+    log,
+    timeoutMs: config.relayTimeoutSeconds * 1000,
+    onFail: (record) => recoverFromFailedRelay(record),
+    // Silence is only reported: the successor may be waiting for the delivery
+    // floor, and rolling back a healthy relay would be worse than saying nothing.
+    onTimeout: () => {},
+  })
 
   /**
    * The durable counter store, when the user asked for one.
@@ -421,6 +571,13 @@ export function apply(ctx, settings = {}) {
   // on the conversation being in the foreground.
   ctx.effect(() => {
     const dispose = ctx.on('session/event', (session, event) => {
+      // The confirmation bookkeeper looks at every event but only reacts to the
+      // sessions it is watching, so this stays cheap on the hot path.
+      try {
+        confirm.handleEvent(session, event)
+      } catch (error) {
+        warnOnce(`dsh-auto-relay: 检查接力会话状态失败 — ${String(error?.message ?? error)}`)
+      }
       try {
         watcher.handleSessionEvent(session, event)
       } catch (error) {
@@ -487,4 +644,4 @@ export function apply(ctx, settings = {}) {
 }
 
 // Exported for tests and for a caller that wants the pieces without mounting.
-export { occupancy, createWatcher, nextTitle, resolveConfig, renderPrompt, DEFAULTS }
+export { occupancy, createWatcher, nextTitle, resolveConfig, renderPrompt, DEFAULTS, selectionOf }

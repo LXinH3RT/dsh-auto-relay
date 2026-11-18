@@ -42,14 +42,48 @@ When a conversation keeps compressing near its context limit, open a continuatio
 | `persistCounter` | `false` | 计数写入本地存储，重启后继续累计 |
 | `switchToRelay` | `true` | 接力会话开始后，把对话界面自动切到新会话 |
 | `archiveOldSession` | `true` | 切到接力会话后，把交出任务的旧会话归档 |
+| `carryQueue` | `true` | 把旧会话里还没处理的排队输入一并交给新会话 |
+| `maxQueueChars` | `6000` | 排队输入随接力传递的字符上限（0 表示不限） |
+| `maxQueueItems` | `20` | 排队输入随接力传递的条数上限（1–200） |
+| `checkRelayModel` | `true` | 接力前先确认新会话要用的模型可以解析 |
+| `relayTimeoutSeconds` | `120` | 等待新会话出现活动的上限（10–3600 秒），超时只提示 |
+| `relayProvider` | 空 | 指定接力会话的提供方，留空沿用上一会话正在使用的提供方 |
+| `relayModel` | 空 | 指定接力会话的模型，留空沿用上一会话正在使用的模型 |
+| `relayReasoningEffort` | 空 | 指定接力会话的推理强度，留空沿用上一会话正在使用的强度 |
 
-配置页按用途分成四组（触发条件、接力会话、会话标题、计数与识别）。数字框留空表示恢复默认值，超出范围的值在保存时收敛到边界；复选框点击即生效；提示词框原样保留换行。
+配置页按用途分成六组（触发条件、接力会话、会话标题、计数与识别、排队输入、接力安全）。数字框留空表示恢复默认值，超出范围的值在保存时收敛到边界；复选框点击即生效；提示词框原样保留换行。
 
 `promptTemplate` 原样保留换行，可用占位符：`{sessionId}`、`{count}`、`{percent}`、`{threshold}`、`{title}`。未识别的占位符保持原样。插件在两页开关都打开时，会在提示词末尾追加一行标记（`[dsh-auto-relay] from=… open=1 archive=1`）供浏览器半部分识别；这一行不影响模型理解，也不会出现在两页开关都关闭的场景里。
 
 默认提示词让新会话**先看会话开头的接续说明**（`dsh-session-continuity` 这类插件会写明上一会话是哪一场，并附上它的结尾或摘要片段），而不是重新翻上一会话的日志。这样定有两个实测依据：翻日志要额外花八到十二次工具调用去找会话文件；而默认提示词原先点名的 `session_trace`、`session_event_read` 这两个工具并不在任何 profile 里都装着，缺了就只能自己想办法解压日志。开头没有接续说明时，提示词退到「看工作区当前状态（未提交的改动、正在改的文件、任务清单）」；两步都不足以判断时改为向用户确认，不凭猜测扩大范围。换成自己的写法直接改这一项即可，占位符照用。
 
-无界面部署可用环境变量调整：`DSH_AUTO_RELAY_ENABLED`、`_THRESHOLD_PERCENT`、`_CONSECUTIVE_COUNT`、`_INCREMENT_TITLE`、`_SEPARATOR`、`_DELAY_SECONDS`、`_IGNORE_SUBAGENTS`、`_ONCE_PER_SESSION`、`_COMPRESS_TOOLS`、`_PERSIST_COUNTER`、`_SWITCH_TO_RELAY`、`_ARCHIVE_OLD_SESSION`。环境变量只在设置面板没有给出该字段时生效。
+无界面部署可用环境变量调整：`DSH_AUTO_RELAY_ENABLED`、`_THRESHOLD_PERCENT`、`_CONSECUTIVE_COUNT`、`_INCREMENT_TITLE`、`_SEPARATOR`、`_DELAY_SECONDS`、`_IGNORE_SUBAGENTS`、`_ONCE_PER_SESSION`、`_COMPRESS_TOOLS`、`_PERSIST_COUNTER`、`_SWITCH_TO_RELAY`、`_ARCHIVE_OLD_SESSION`、`_CARRY_QUEUE`、`_MAX_QUEUE_CHARS`、`_MAX_QUEUE_ITEMS`、`_CHECK_RELAY_MODEL`、`_RELAY_TIMEOUT_SECONDS`、`_RELAY_PROVIDER`、`_RELAY_MODEL`、`_RELAY_REASONING_EFFORT`。环境变量只在设置面板没有给出该字段时生效。
+
+## 排队输入
+
+用户在会话工作期间继续输入的指令，DSH 会先放进该会话自己的队列。接力时这些还没处理的输入会随任务一起交给新会话：按顺序抄录进投递的提示词，并明确说明它们是延续该任务的指令，而不是刚说过的内容需要再确认一遍。
+
+传多少受 `maxQueueChars` 与 `maxQueueItems` 限制，超出的部分留在旧会话并在提示词里注明。迁移顺序固定为**先预订单接力会话、再从旧队列移除**——预订失败时用户已输入的内容原封不动留在旧会话，这是实测中真实发生过的失败。把 `carryQueue` 关掉则不做任何搬运，队列按 DSH 原有行为留在旧会话。
+
+## 接力失败兜底
+
+新会话建好不等于它能跑。插件记账每个接力会话的首轮：出现 `step/start`、`assistant/message`、`assistant/attempt`、`tool/call` 中任意一个，或首轮不是以错误结束，都算成功；只有**首轮就报错**才判定接力失败。失败时把旧会话从归档里取回、把搬走的排队输入放回旧队列，让它继续处理，并记录一条警告。
+
+这与实测的一次故障对应：接力会话创建成功、投递也正常，但第一次模型调用就因为模型名解析不到而失败，而那时旧会话已经把工作交了出去。
+
+## 接力会话跑在哪个模型上
+
+接力任务本身带不了模型——`new_once` 只接受工作目录与 agent preset，新会话因此按 profile 的默认模型创建。这就是故障的入口：默认模型若指向一个已被下线、或没有在提供方里启用的模型名，新会话会在第一次模型调用时失败（`UNKNOWN_MODEL`）；而接力本来就是同一件工作的延续，跑在为这件工作服务的模型上才合理。
+
+所以这三项**留空时沿用上一会话正在使用的路由**：提供方、模型名、以及推理强度，都取自递出任务的那个会话自己记下的 header（没有 header 时取它最后一次请求解析出的上下文）。这一读取顺序是实测定的——`request/header` 带 `reasoningEffort`，`request/context` 不带，所以 header 优先。
+
+想让接力换一条路由时，把 `relayProvider` 与 `relayModel` 一起填上，插件会在新会话出现时把这两项固定到它上面（`relayReasoningEffort` 可选）。固定用的是 `agent.model.select`，**不会**改写你的全局默认模型——那属于模型选择器的职责，不该由一个接力插件替你决定。
+
+只填一半（只有提供方或只有模型名）不会被当成一次指定：不完整的路由不固定，仍按上一会话的路由走。固定是尽力而为：新会话要靠投递才会真正创建，等待窗口内没出现就放弃，此时接力本身照常进行，`checkRelayModel` 仍是最后一道拦截。
+
+`relayTimeoutSeconds` 只是等待上限：超过时限仍没有任何活动只记一条提示，**不会**当作失败回滚——接力可能只是在等投递间隔，回滚一个健康的接力比保持沉默更糟。
+
+接力前还会问一次 LLM 注册表：新会话要用的模型能否解析。解析不了就跳过这次接力并提示，不创建注定失败的会话。只有「明确解析失败」才阻止交接；探测服务缺失、或探测本身因别的原因出错，一律照常接力（`checkRelayModel` 可整体关闭）。
 
 ## 标题递增
 
@@ -81,6 +115,7 @@ When a conversation keeps compressing near its context limit, open a continuatio
 - 由两个半部分组成：Host 半部分负责识别压缩、计数与创建接力会话；浏览器半部分（`client.js`）负责在接力投递后切换界面、归档旧会话，并承载配置页面。
 - 可选依赖 `@deepseek-ai/schemastery`；缺失时插件按默认值运行，面板不提供开关（日志会说明）。
 - 定时任务服务（`schedule`）与标题服务（`sessionTitle`）缺失时：前者使接力无法创建（记录一次警告，资格保留待重试），后者使标题回退到 `defaultTitle`。
+- 排队输入、模型预检与失败兜底都只依赖 DSH 自带服务（`agents`、`llm`、`workspaceRegistry`）；这些服务中任何一个缺失时对应能力自动降级——队列不搬运、预检跳过（照常接力）、失败无法回滚但会记录警告。
 - 浏览器缺少设置服务（`configForms`）或插槽服务（`slots`）时，配置页安静地不出现，接力与界面跟随照常工作。iOS 与原生壳不加载浏览器半部分，此时切换与归档也不生效。
 
 ## 安装

@@ -42,14 +42,48 @@ Open **Settings → Plugins**, then open this plugin's page or its row: every fi
 | `persistCounter` | `false` | Write counters to local storage so a restart resumes them |
 | `switchToRelay` | `true` | Show the relay session as soon as it starts |
 | `archiveOldSession` | `true` | Archive the session that handed off |
+| `carryQueue` | `true` | Send input still waiting in the old queue to the new session |
+| `maxQueueChars` | `6000` | Character bound on carried input (`0` = no bound) |
+| `maxQueueItems` | `20` | Message bound on carried input (1–200) |
+| `checkRelayModel` | `true` | Check that the continuation's model resolves before handing off |
+| `relayTimeoutSeconds` | `120` | How long to wait for any sign of activity (10–3600 s); silence is only reported |
+| `relayProvider` | empty | Provider for the continuation session; empty inherits the one the previous session is running on |
+| `relayModel` | empty | Model for the continuation session; empty inherits the previous session's model |
+| `relayReasoningEffort` | empty | Reasoning effort for it; empty inherits the previous session's effort |
 
-The page groups the fields by purpose (when to relay, the continuation session, the title, counting and detection). An emptied number field falls back to the default; an out-of-range value is clamped on save; a checkbox applies at once; the prompt box keeps its newlines.
+The page groups the fields by purpose (when to relay, the continuation session, the title, counting and detection, carried input, relay safety). An emptied number field falls back to the default; an out-of-range value is clamped on save; a checkbox applies at once; the prompt box keeps its newlines.
 
 `promptTemplate` preserves newlines and accepts `{sessionId}`, `{count}`, `{percent}`, `{threshold}` and `{title}`; unknown placeholders stay literal. With both follow switches on, the plugin appends one marker line to the delivered prompt (`[dsh-auto-relay] from=… open=1 archive=1`) for the browser half to read; it does not change how the model reads the task, and it is absent when both switches are off.
 
 The default prompt sends the new session to the **continuity notice at the top of its own conversation** (plugins such as `dsh-session-continuity` name the predecessor there and quote its ending or digest) rather than back into the previous session's log. Two measurements drove that choice: rebuilding context from the log cost eight to twelve extra tool calls spent locating the session file, and the tools the old default named — `session_trace`, `session_event_read` — are not installed in every profile, so the model had to improvise a decompression. Where no notice is present the prompt falls back to reading the workspace's current state (uncommitted changes, files in flight, the task list); when neither settles it, the session asks the user which single task to resume instead of widening the scope on a guess. Replace the field to use your own wording; the placeholders keep working.
 
-Headless deployments can tune an install with `DSH_AUTO_RELAY_ENABLED`, `_THRESHOLD_PERCENT`, `_CONSECUTIVE_COUNT`, `_INCREMENT_TITLE`, `_SEPARATOR`, `_DELAY_SECONDS`, `_IGNORE_SUBAGENTS`, `_ONCE_PER_SESSION`, `_COMPRESS_TOOLS`, `_PERSIST_COUNTER`, `_SWITCH_TO_RELAY` and `_ARCHIVE_OLD_SESSION`. A variable applies only where the settings panel has no value for that field.
+Headless deployments can tune an install with `DSH_AUTO_RELAY_ENABLED`, `_THRESHOLD_PERCENT`, `_CONSECUTIVE_COUNT`, `_INCREMENT_TITLE`, `_SEPARATOR`, `_DELAY_SECONDS`, `_IGNORE_SUBAGENTS`, `_ONCE_PER_SESSION`, `_COMPRESS_TOOLS`, `_PERSIST_COUNTER`, `_SWITCH_TO_RELAY`, `_ARCHIVE_OLD_SESSION`, `_CARRY_QUEUE`, `_MAX_QUEUE_CHARS`, `_MAX_QUEUE_ITEMS`, `_CHECK_RELAY_MODEL`, `_RELAY_TIMEOUT_SECONDS`, `_RELAY_PROVIDER`, `_RELAY_MODEL` and `_RELAY_REASONING_EFFORT`. A variable applies only where the settings panel has no value for that field.
+
+## Carried input
+
+Anything the user types while a session is working waits in that session's own queue. On a hand-off the input still waiting travels with the task: it is transcribed into the delivered prompt in order, with an explicit note that these are instructions continuing the work rather than fresh requests to confirm.
+
+`maxQueueChars` and `maxQueueItems` bound how much travels; the remainder stays behind and the prompt says so. The order is fixed — **reserve the continuation first, remove from the old queue second** — so a failed reservation leaves everything the user typed untouched, which is exactly the failure observed here. Switching `carryQueue` off moves nothing and leaves the queue where DSH keeps it.
+
+## When the relay fails
+
+Creating the successor is not the same as it running. The plugin tracks each relay session's first turn: a `step/start`, `assistant/message`, `assistant/attempt` or `tool/call`, or a first turn that ends without an error, all count as success. Only **an error on that first turn** is treated as a failed relay. On failure the predecessor is taken back out of the archive, the carried input is handed back to its queue, and the old session can continue — with a warning recorded.
+
+That matches an observed failure: the successor was created and the task was delivered, but its very first model call rejected because the model name no longer resolved, by which time the old session had already handed the work over.
+
+`relayTimeoutSeconds` is only a waiting bound: exceeding it with no activity records a note and **never** rolls anything back — the relay may simply be waiting for the delivery floor, and undoing a healthy hand-off would be worse than saying nothing.
+
+Before creating anything the plugin also asks the LLM registry whether the continuation's model resolves. A route that cannot resolve skips the hand-off with a warning instead of creating a session that is certain to fail on its first call. Only a definite resolution failure blocks it: a missing registry, a missing selection, or a probe that fails for any other reason relays as usual (`checkRelayModel` turns the whole check off).
+
+## Which model the continuation runs on
+
+The relay task cannot carry a model — `new_once` accepts only a working directory and an agent preset, so the successor would be created on whatever the profile's default model is. That is the entry point of the failure: when the default names a model the provider has retired or not enabled, the new session dies on its very first call (`UNKNOWN_MODEL`), and a relay is by definition the continuation of one piece of work, so it belongs on the model that has been doing that work.
+
+So these three fields **inherit the route the previous session is running on** when left empty: provider, model, and reasoning effort all come from the header the handing-off session recorded (falling back to its last resolved request context). That order is measured, not guessed — `request/header` carries `reasoningEffort` and `request/context` does not, so the header is read first.
+
+Filling in `relayProvider` and `relayModel` (optionally `relayReasoningEffort`) pins that route onto the successor as soon as it appears. The pin uses `agent.model.select`, so it **does not** rewrite your global default model — that belongs to the model picker, not to a relay plugin acting on your behalf.
+
+Half a pair is not a choice: an incomplete route pins nothing and the inherited route is used. Pinning is best-effort in any case: the successor only exists once the delivery creates it, so a session that never appears inside the wait window is given up on, the hand-off itself is unaffected, and `checkRelayModel` remains the real guard.
 
 ## Title increment
 
@@ -81,6 +115,7 @@ Profiles implement compression differently, and both shapes are recognised:
 - Two halves: the Host half owns detection, counting and the hand-off; the browser half (`client.js`) follows the relay into view, archives the session that handed off, and carries the configuration page.
 - Optional dependency on `@deepseek-ai/schemastery`: without it the plugin runs on its defaults and the panel offers no switches (the log says so).
 - Without the scheduling service (`schedule`) the hand-off cannot be created (one warning, retried later); without the title service (`sessionTitle`) the title falls back to `defaultTitle`.
+- Carried input, the model pre-flight and the failure rollback depend only on DSH's own `agents`, `llm` and `workspaceRegistry` services. Any of them missing degrades the matching capability — nothing is carried, the pre-flight is skipped (the relay proceeds), the rollback cannot run (warnings are still recorded).
 - A browser without the settings service (`configForms`) or the slot service (`slots`) simply shows no configuration page; the relay and the follow keep working. iOS and native shells load no browser half at all, so neither the follow nor the archive happens there.
 
 ## Install
