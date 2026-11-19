@@ -47,6 +47,8 @@ function stubContext({
   const removed = []
   const prepended = []
   const pinned = []
+  const cancelled = []
+  const woken = []
   let scheduleFails = false
   // The inbox is a live list, so `remove`/`prepend` are observable exactly as the
   // real driver-owned inbox would be.
@@ -98,7 +100,14 @@ function stubContext({
         return {
           turnBoundaryOf: () => ({ openTurnStartSeq: openTurn ? 7 : null }),
           get: (id) => {
-            if (id === session.id) return { id, inbox }
+            if (id === session.id) {
+              return {
+                id,
+                inbox,
+                cancel: (cause) => cancelled.push(cause),
+                wakeDriver: () => woken.push(id),
+              }
+            }
             // The reserved successor id only becomes a live agent once the
             // delivery creates the session; `pinnable` stands in for that.
             if (pinnable && id === 'session-new-1') {
@@ -171,6 +180,8 @@ function stubContext({
     prepended,
     inbox,
     pinned,
+    cancelled,
+    woken,
     failSchedule() {
       scheduleFails = true
     },
@@ -574,18 +585,25 @@ test('turning carryQueue off leaves the queue in the old session', async () => {
   stub.dispose()
 })
 
-test('a failed reservation leaves the queue untouched', async () => {
-  // This is the failure actually observed: the successor could not be created,
-  // so draining first would have destroyed what the user typed.
+test('a failed reservation hands the queue back', async () => {
+  // The queue has to leave the session before the reservation is awaited —
+  // otherwise the old session opens another turn in the gap. So the guarantee is
+  // not "never taken" but "taken and put back", which is what this checks: the
+  // message leaves, then returns, and the loop is woken to find it.
   const stub = stubContext({ percent: 62, queue: [queued('q1', '这条不能丢')] })
   stub.failSchedule()
   apply(stub.ctx, { consecutiveCount: 1 })
   stub.emit('session/event', session, start('c1'))
   stub.emit('session/event', session, end('c1'))
   await new Promise((resolve) => setImmediate(resolve))
-  assert.deepEqual(stub.removed, [], 'nothing was drained')
-  assert.equal(stub.inbox.hasPending, true, 'the message is still queued')
-  assert.equal(stub.warnings.length, 1)
+  assert.deepEqual(stub.removed, ['q1'], 'it left the session')
+  assert.deepEqual(stub.prepended.map((entry) => entry.message.id), ['q1'], 'and came back')
+  assert.equal(stub.inbox.hasPending, true, 'the message is queued again')
+  assert.deepEqual(stub.woken, ['session-a'], 'the restored queue woke the loop')
+  assert.ok(
+    stub.warnings.some((warning) => /放回/u.test(warning)),
+    `the warning says it was handed back: ${JSON.stringify(stub.warnings)}`,
+  )
   stub.dispose()
 })
 
@@ -685,7 +703,7 @@ test('an unrelated session erroring does not touch the relay', async () => {
 // The model is asked before anything is created
 // ---------------------------------------------------------------------------
 
-test('an unresolvable model skips the hand-off with a warning', async () => {
+test('an unresolvable model skips the hand-off and keeps the queue', async () => {
   const stub = stubContext({
     percent: 62,
     queue: [queued('q1', '不该被搬走')],
@@ -705,7 +723,9 @@ test('an unresolvable model skips the hand-off with a warning', async () => {
   await new Promise((resolve) => setImmediate(resolve))
 
   assert.equal(stub.created.length, 0, 'nothing was created')
-  assert.deepEqual(stub.removed, [], 'and nothing was drained')
+  // The queue was taken before the probe and handed back when the probe refused:
+  // a skipped hand-off must leave the session able to do the work itself.
+  assert.deepEqual(stub.prepended.map((entry) => entry.message.id), ['q1'], 'it was handed back')
   assert.equal(stub.inbox.hasPending, true, 'the queue is intact for the next attempt')
   assert.ok(
     stub.warnings.some((warning) => /hy4free|接力被跳过/u.test(warning)),
@@ -879,6 +899,71 @@ test('a half-filled relay pair is ignored rather than half applied', async () =>
 
   assert.equal(stub.created.length, 1)
   assert.deepEqual(stub.pinned, [])
+  stub.dispose()
+})
+
+// ---------------------------------------------------------------------------
+// The predecessor is stopped once the work has moved
+// ---------------------------------------------------------------------------
+
+test('the predecessor is stopped once the successor is reserved', async () => {
+  // The empty queue already denies the loop a reason to open another turn; this
+  // is what ends a turn that was still running when the relay fired, so the old
+  // session stops instead of finishing work the successor now owns.
+  const stub = stubContext({ percent: 62, queue: [queued('q1', '交给新会话')] })
+  apply(stub.ctx, { consecutiveCount: 1 })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(stub.removed, ['q1'], 'the queue moved')
+  assert.equal(stub.cancelled.length, 1, 'the old session was stopped')
+  assert.equal(stub.cancelled[0].kind, 'hook', 'not reported as a user stop')
+  assert.match(String(stub.cancelled[0].reason), /dsh-auto-relay/u)
+  stub.dispose()
+})
+
+test('a truncated queue keeps the predecessor running', async () => {
+  // What the bounds cut was never promised to the successor, so the session that
+  // still holds those messages has to stay awake to do them.
+  const stub = stubContext({
+    percent: 62,
+    queue: [queued('q1', 'a'.repeat(50)), queued('q2', 'b'.repeat(50)), queued('q3', 'c'.repeat(50))],
+  })
+  apply(stub.ctx, { consecutiveCount: 1, maxQueueChars: 120, maxQueueItems: 2 })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(stub.removed, ['q1', 'q2'], 'only the transcribed prefix left')
+  assert.deepEqual(stub.cancelled, [], 'the third message keeps it awake')
+  stub.dispose()
+})
+
+test('turning archiveOldSession off leaves the predecessor running', async () => {
+  const stub = stubContext({ percent: 62, queue: [queued('q1', '继续')] })
+  apply(stub.ctx, { consecutiveCount: 1, archiveOldSession: false })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(stub.created.length, 1, 'the relay still happened')
+  assert.deepEqual(stub.cancelled, [], 'but nothing was stopped')
+  stub.dispose()
+})
+
+test('a failed reservation never stops the predecessor', async () => {
+  // Stopping is gated on the reservation precisely for this case: the successor
+  // does not exist, so the old session is still the only place the work lives.
+  const stub = stubContext({ percent: 62, queue: [queued('q1', '还在')] })
+  stub.failSchedule()
+  apply(stub.ctx, { consecutiveCount: 1 })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(stub.cancelled, [], 'it was left running')
+  assert.equal(stub.inbox.hasPending, true, 'with its queue handed back')
   stub.dispose()
 })
 

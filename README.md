@@ -41,7 +41,7 @@ Open **Settings → Plugins**, then open this plugin's page or its row: every fi
 | `compressTools` | `compress,mcp__bili__compress` | Tool names that count as a compression |
 | `persistCounter` | `false` | Write counters to local storage so a restart resumes them |
 | `switchToRelay` | `true` | Show the relay session as soon as it starts |
-| `archiveOldSession` | `true` | Archive the session that handed off |
+| `archiveOldSession` | `true` | Stop and archive the session that handed off, once the successor is reserved |
 | `carryQueue` | `true` | Send input still waiting in the old queue to the new session |
 | `maxQueueChars` | `6000` | Character bound on carried input (`0` = no bound) |
 | `maxQueueItems` | `20` | Message bound on carried input (1–200) |
@@ -63,7 +63,11 @@ Headless deployments can tune an install with `DSH_AUTO_RELAY_ENABLED`, `_THRESH
 
 Anything the user types while a session is working waits in that session's own queue. On a hand-off the input still waiting travels with the task: it is transcribed into the delivered prompt in order, with an explicit note that these are instructions continuing the work rather than fresh requests to confirm.
 
-`maxQueueChars` and `maxQueueItems` bound how much travels; the remainder stays behind and the prompt says so. The order is fixed — **reserve the continuation first, remove from the old queue second** — so a failed reservation leaves everything the user typed untouched, which is exactly the failure observed here. Switching `carryQueue` off moves nothing and leaves the queue where DSH keeps it.
+`maxQueueChars` and `maxQueueItems` bound how much travels; the remainder stays behind and the prompt says so. The queue is taken **synchronously, at the moment of the hand-off**: it leaves the old session first, and the continuation is reserved second. That order is what closes the race — an old session only declines to open another turn once its queue is empty, so waiting for the reservation first leaves a window in which it opens one and claims a message (measured: 54 ms and one extra task). A failed reservation puts the messages back in their original order and wakes the session, so nothing typed is lost. Switching `carryQueue` off moves nothing and leaves the queue where DSH keeps it.
+
+## When the old session stops
+
+With `archiveOldSession` on, the handing-off session is stopped once the continuation has been reserved, so it cannot redo work that has moved. The stop follows the reservation on purpose: a reservation that failed leaves the old session as the only holder of the work, and it must keep running. A queue truncated by the bounds also skips the stop — those messages stayed behind and the session still has to handle them, which the prompt states. The stop is recorded with a `hook` cause and a reason, so the log does not read as a manual stop. To keep the old session running alongside its successor, switch `archiveOldSession` off.
 
 ## When the relay fails
 

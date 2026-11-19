@@ -195,7 +195,8 @@ function defineConfig(Schema) {
     archiveOldSession: Schema.boolean()
       .default(DEFAULTS.archiveOldSession)
       .description(
-        '切换到接力会话后，把交出任务的旧会话归档，保持会话列表清爽（归档的会话可在侧边栏恢复）。' +
+        '接力会话建好后，停掉交出任务的旧会话并把它归档（归档的会话可在侧边栏恢复）。' +
+        '停掉旧会话意味着它不会再把没交出去的活干一遍；若还有排队输入因为长度上限没被抄走，本项会自动跳过，让旧会话留着处理。' +
         '需要上面一项开启；仅开启本项时界面仍会先切到新会话，因为归档当前会话会清空对话区。',
       )
       .volatile(),
@@ -367,6 +368,107 @@ export function apply(ctx, settings = {}) {
   }
 
   /**
+   * Take the old session's queued input, synchronously, at the hand-off moment.
+   *
+   * Must not await anything: `agent/turn-stopping` fires in the same tick in
+   * which the loop decides whether to open another turn, and a non-empty inbox
+   * makes it open one. So the transcript is rendered, the messages it names are
+   * removed, and the whole thing is returned in one pass — see `lib/queue.js`
+   * and the relay in `lib/watch.js`.
+   *
+   * What the bounds cut stays in the old session on purpose: the successor was
+   * never told about it, so leaving it is the only outcome that loses nothing.
+   * `total > count` therefore means "the old session still has work" and is what
+   * forbids stopping it.
+   *
+   * @returns `{drained, block, count, total, restore}` or null when carrying is off.
+   */
+  function prepareCarry(session) {
+    if (!config.carryQueue) return null
+    const agent = ctx.get?.('agents')?.get?.(session.id)
+    const pending = readInbox(agent)
+    if (pending.total === 0) {
+      return { drained: [], block: '', count: 0, total: 0, restore: () => 0, agent }
+    }
+    const bounds = { maxChars: config.maxQueueChars, maxItems: config.maxQueueItems }
+    const block = renderQueue(pending, bounds)
+    const count = renderedCount(pending, bounds)
+    const drained = count > 0 ? drainQueue(agent, pending, count) : []
+    return {
+      drained,
+      block,
+      count,
+      total: pending.total,
+      agent,
+      // `prepend` is durable but silent: the loop only notices new input through
+      // `followup`/`steer`. Restoring without waking would leave the messages
+      // sitting in an idle session until the user typed something.
+      restore: () => {
+        const restored = restoreQueue(agent, drained)
+        if (restored > 0) wakeAgent(agent)
+        return restored
+      },
+    }
+  }
+
+  /**
+   * Stop the old session once its queue has moved, when the user asked for it.
+   *
+   * The queue being empty already denies the loop a reason to open another turn,
+   * so this is the belt to that braces — and it is what makes the hand-off
+   * authoritative rather than merely hopeful: a running turn will otherwise run
+   * to its end after the successor has started.
+   *
+   * Gated on `archiveOldSession` because that switch is the user's statement that
+   * the old conversation is finished with. The cause is `hook` rather than `user`
+   * so the log does not read as if the user pressed stop, and it is one of the
+   * four causes the loop's own `abortedCancelCause` accepts.
+   *
+   * Refuses when anything is still queued: those messages were never given to the
+   * successor, so the session that still holds them has to stay awake.
+   */
+  function stopOldSession(session, carry) {
+    if (!config.archiveOldSession) return false
+    const result = carry ?? prepareCarry(session)
+    if (result === null) {
+      // Carrying is off, so ask the session directly whether it still has work.
+      if (readInbox(ctx.get?.('agents')?.get?.(session.id)).total > 0) return false
+    } else if (result.total > result.count) {
+      return false
+    }
+    const agent = ctx.get?.('agents')?.get?.(session.id)
+    if (agent === undefined || typeof agent.cancel !== 'function') return false
+    try {
+      agent.cancel({ kind: 'hook', reason: 'dsh-auto-relay: 已交接给接力会话' })
+      return true
+    } catch (error) {
+      warnOnce(`dsh-auto-relay: 停止上一会话失败 — ${String(error?.message ?? error)}`)
+      return false
+    }
+  }
+
+  /**
+   * Wake an agent whose queue was just refilled.
+   *
+   * `restoreQueue` prepends through the inbox, which is durable but silent — the
+   * loop only learns about new input through `followup`/`steer`. After a failed
+   * hand-off the session is usually idle, so without this the restored messages
+   * would sit there until the user typed something.
+   */
+  function wakeAgent(agent) {
+    if (agent === undefined || agent === null) return false
+    try {
+      if (typeof agent.wakeDriver === 'function') {
+        agent.wakeDriver()
+        return true
+      }
+    } catch (error) {
+      warnOnce(`dsh-auto-relay: 唤醒上一会话失败 — ${String(error?.message ?? error)}`)
+    }
+    return false
+  }
+
+  /**
    * Create the continuation session and return its identity.
    *
    * `new_once` reserves the Session id at creation and creates the Session on
@@ -378,8 +480,11 @@ export function apply(ctx, settings = {}) {
    * decide those but cannot perform them — moving the visible conversation is a
    * client-only capability — so the switches travel on the one field both halves
    * share.
+   *
+   * `carry` arrives already taken (see {@link prepareCarry}); this function only
+   * renders it into the prompt, because by the time it runs the queue is gone.
    */
-  async function handOff(session, armed, currentTitle) {
+  async function handOff(session, armed, currentTitle, carry) {
     const schedule = ctx.get?.('schedule')
     if (schedule === undefined || typeof schedule.create !== 'function') {
       throw new Error('schedule 服务不可用，无法创建接力会话')
@@ -402,16 +507,7 @@ export function apply(ctx, settings = {}) {
       config.separator,
       config.defaultTitle,
     )
-    // Whatever the user typed while the session was working travels with the
-    // work. Rendering it here (before the reservation) is what makes the prompt
-    // complete; draining it happens only after the reservation succeeds.
-    const pending = config.carryQueue ? readInbox(ctx.get?.('agents')?.get?.(session.id)) : { nextTurn: [], nextStep: [], total: 0 }
-    const queueBlock = config.carryQueue
-      ? renderQueue(pending, { maxChars: config.maxQueueChars, maxItems: config.maxQueueItems })
-      : ''
-    const carryCount = config.carryQueue
-      ? renderedCount(pending, { maxChars: config.maxQueueChars, maxItems: config.maxQueueItems })
-      : 0
+    const queueBlock = carry?.block ?? ''
     const body = renderPrompt(config.promptTemplate, {
       sessionId: session.id,
       count: armed.count,
@@ -440,18 +536,6 @@ export function apply(ctx, settings = {}) {
     const sessionId = entry?.target?.sessionId
     const resolvedTitle = entry?.record?.title ?? title.title
 
-    // The successor is reserved, so the hand-off is real — only now may the old
-    // queue be emptied. Doing it earlier would lose the user's words whenever
-    // the reservation failed, which is the failure actually observed here.
-    let drained = []
-    if (carryCount > 0) {
-      try {
-        drained = drainQueue(ctx.get?.('agents')?.get?.(session.id), pending, carryCount)
-      } catch (error) {
-        warnOnce(`dsh-auto-relay: 移出排队输入失败，它们会留在上一会话 — ${String(error?.message ?? error)}`)
-      }
-    }
-
     // Watch the successor until it proves it can run. The bookkeeping lives in
     // `lib/confirm.js`; the recovery below is what this mount can actually do.
     if (typeof sessionId === 'string' && sessionId !== '') {
@@ -460,7 +544,11 @@ export function apply(ctx, settings = {}) {
         childId: sessionId,
         title: resolvedTitle,
         count: armed.count,
-        drained,
+        drained: carry?.drained ?? [],
+        // Kept so a rollback can stop the session again: the old session is not
+        // cancelled until the successor is known, otherwise its queue could be
+        // cleared by the cancel before it was ever read.
+        carried: carry?.count ?? 0,
       })
       // The reservation cannot carry a model, so the inherited (or pinned) route
       // is applied as soon as the delivery creates the session. This runs
@@ -473,7 +561,7 @@ export function apply(ctx, settings = {}) {
       }
     }
 
-    return { sessionId, title: resolvedTitle, carried: drained.length, queueTotal: pending.total }
+    return { sessionId, title: resolvedTitle, carried: carry?.drained?.length ?? 0, queueTotal: carry?.total ?? 0 }
   }
 
   /**
@@ -498,6 +586,11 @@ export function apply(ctx, settings = {}) {
       if (restored > 0) {
         warn(`dsh-auto-relay: 已把 ${restored} 条排队输入放回上一会话 ${record.parentId}，它会继续处理`)
       }
+      // `prepend` is durable but silent: the loop only notices new input through
+      // `followup`/`steer`, and by now the old session is usually idle after a
+      // hand-off. Without the wake the restored work would sit there until the
+      // user typed something.
+      wakeAgent(parent)
     }
   }
 
@@ -554,6 +647,8 @@ export function apply(ctx, settings = {}) {
     readTitle,
     hasOpenTurn,
     handOff,
+    prepareCarry,
+    stopOldSession,
     log,
     warn,
     store,

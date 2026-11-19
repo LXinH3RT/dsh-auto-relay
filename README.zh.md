@@ -41,7 +41,7 @@ When a conversation keeps compressing near its context limit, open a continuatio
 | `compressTools` | `compress,mcp__bili__compress` | 把压缩实现为工具调用时，哪些工具名算作压缩 |
 | `persistCounter` | `false` | 计数写入本地存储，重启后继续累计 |
 | `switchToRelay` | `true` | 接力会话开始后，把对话界面自动切到新会话 |
-| `archiveOldSession` | `true` | 切到接力会话后，把交出任务的旧会话归档 |
+| `archiveOldSession` | `true` | 接力会话建好后停掉并归档交出任务的旧会话 |
 | `carryQueue` | `true` | 把旧会话里还没处理的排队输入一并交给新会话 |
 | `maxQueueChars` | `6000` | 排队输入随接力传递的字符上限（0 表示不限） |
 | `maxQueueItems` | `20` | 排队输入随接力传递的条数上限（1–200） |
@@ -63,7 +63,13 @@ When a conversation keeps compressing near its context limit, open a continuatio
 
 用户在会话工作期间继续输入的指令，DSH 会先放进该会话自己的队列。接力时这些还没处理的输入会随任务一起交给新会话：按顺序抄录进投递的提示词，并明确说明它们是延续该任务的指令，而不是刚说过的内容需要再确认一遍。
 
-传多少受 `maxQueueChars` 与 `maxQueueItems` 限制，超出的部分留在旧会话并在提示词里注明。迁移顺序固定为**先预订单接力会话、再从旧队列移除**——预订失败时用户已输入的内容原封不动留在旧会话，这是实测中真实发生过的失败。把 `carryQueue` 关掉则不做任何搬运，队列按 DSH 原有行为留在旧会话。
+传多少受 `maxQueueChars` 与 `maxQueueItems` 限制，超出的部分留在旧会话并在提示词里注明。取出的时机是**交接的同一刻、同步完成**：排队输入先离开旧队列，再去预订接力会话。这个顺序是必需的——旧会话只在队列为空时才不开下一轮，若等预订结果再取，中间那一小段时间足够它开新一轮并认领一条输入（实测多跑了 54 毫秒、多做了一条任务）。预订失败会把消息按原序放回并唤醒旧会话，不丢内容。把 `carryQueue` 关掉则不做任何搬运，队列按 DSH 原有行为留在旧会话。
+
+## 旧会话何时停下
+
+`archiveOldSession` 打开时，接力会话一旦预订成功，插件就停掉交出任务的旧会话，使它不会把已经交接出去的活重做一遍。停止发生在预订成功之后：预订失败时旧会话仍持有全部工作，必须继续跑。队列被长度上限截断时也会跳过停止——没被抄走的那些输入仍留在旧会话，得让它自己处理，此时提示词里也注明了还有剩余。
+
+停止以 `hook` 为原因并附带说明，会话日志里不会显示成你手动点的停止；想彻底保留旧会话继续运行，把 `archiveOldSession` 关掉即可。
 
 ## 接力失败兜底
 
