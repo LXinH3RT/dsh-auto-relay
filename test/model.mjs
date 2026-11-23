@@ -8,7 +8,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { bindRelayModel, selectionOf, runningSelection, DEFAULT_ATTEMPTS, DEFAULT_DELAY_MS } from '../lib/model.js'
+import { bindRelayModel, createCreationBinding, selectionOf, runningSelection, DEFAULT_ATTEMPTS, DEFAULT_DELAY_MS } from '../lib/model.js'
 
 /** A context whose `agents.get` answers from a scripted queue of lookups. */
 function stubContext({ answers, select } = {}) {
@@ -197,3 +197,140 @@ test('the defaults cover the delivery floor rather than an instant', () => {
     `${DEFAULT_ATTEMPTS} looks every ${DEFAULT_DELAY_MS} ms must span the 60 s floor`,
   )
 })
+
+// ---------------------------------------------------------------------------
+// createCreationBinding — writing the route from `agent/created`.
+//
+// This is the mechanism that closes the first-request race: the agent factory
+// awaits `agent/created` while the agent is entered but before the loop's first
+// turn, so a selection recorded there is in the log before `model.current()` is
+// read. Waiting for the session to exist (what the poll does) is always too late.
+// ---------------------------------------------------------------------------
+
+/** A context that lets the test fire `agent/created` by hand. */
+function creationContext() {
+  const listeners = new Map()
+  return {
+    ctx: {
+      on(event, handler) {
+        listeners.set(event, handler)
+        return () => {
+          listeners.delete(event)
+        }
+      },
+    },
+    fire(agent) {
+      const handler = listeners.get('agent/created')
+      if (handler === undefined) throw new Error('no agent/created listener was registered')
+      return handler({ agent, source: 'startup' })
+    },
+    get wired() {
+      return listeners.has('agent/created')
+    },
+  }
+}
+
+test('the creation hook selects the route the instant the successor appears', () => {
+  const stub = creationContext()
+  const selected = []
+  const binding = createCreationBinding({
+    ctx: stub.ctx,
+    log: () => {},
+    warn: () => {},
+  })
+  binding.expect('session-new', pinned)
+  stub.fire({ id: 'session-new', model: { select: (selection) => selected.push(selection) } })
+  assert.deepEqual(selected, [pinned], 'the selection is applied before any request')
+  assert.deepEqual(binding.inspect(), [], 'the expectation is consumed')
+})
+
+test('an expectation for another session does not match', () => {
+  const stub = creationContext()
+  const selected = []
+  const binding = createCreationBinding({ ctx: stub.ctx })
+  binding.expect('session-new', pinned)
+  stub.fire({ id: 'session-other', model: { select: (selection) => selected.push(selection) } })
+  assert.deepEqual(selected, [], 'nothing is pinned onto an unrelated session')
+  assert.equal(binding.inspect().length, 1, 'the expectation is still waiting')
+})
+
+test('the hook is idempotent: a second creation for the same id does nothing', () => {
+  const stub = creationContext()
+  const selected = []
+  const binding = createCreationBinding({ ctx: stub.ctx })
+  binding.expect('session-new', pinned)
+  const agent = { id: 'session-new', model: { select: (selection) => selected.push(selection) } }
+  stub.fire(agent)
+  stub.fire(agent)
+  assert.deepEqual(selected, [pinned], 'the second creation has nothing left to apply')
+})
+
+test('selecting nothing when there is no expectation', () => {
+  const stub = creationContext()
+  const selected = []
+  const binding = createCreationBinding({ ctx: stub.ctx })
+  stub.fire({ id: 'session-any', model: { select: (selection) => selected.push(selection) } })
+  assert.deepEqual(selected, [])
+})
+
+test('an agent without a model surface is warned about, not thrown', () => {
+  const stub = creationContext()
+  const warnings = []
+  const binding = createCreationBinding({ ctx: stub.ctx, warn: (message) => warnings.push(message) })
+  binding.expect('session-new', pinned)
+  stub.fire({ id: 'session-new' })
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /没有可用的模型接口/u)
+})
+
+test('a throwing select is warned about and never propagates', () => {
+  const stub = creationContext()
+  const warnings = []
+  const binding = createCreationBinding({ ctx: stub.ctx, warn: (message) => warnings.push(message) })
+  binding.expect('session-new', pinned)
+  stub.fire({
+    id: 'session-new',
+    model: { select: () => { throw new Error('route is busy') } },
+  })
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /route is busy/u)
+})
+
+test('stale expectations are forgotten so a cancelled task cannot leak', () => {
+  let clock = 1000
+  const stub = creationContext()
+  const binding = createCreationBinding({ ctx: stub.ctx, now: () => clock, ttlMs: 1000 })
+  binding.expect('session-old', pinned)
+  clock += 5000
+  const selected = []
+  stub.fire({ id: 'session-old', model: { select: (selection) => selected.push(selection) } })
+  assert.deepEqual(selected, [], 'an expectation older than the ttl is not applied')
+})
+
+test('an incomplete selection or empty id is never recorded', () => {
+  const stub = creationContext()
+  const binding = createCreationBinding({ ctx: stub.ctx })
+  binding.expect('', pinned)
+  binding.expect(undefined, pinned)
+  binding.expect('session-new', null)
+  binding.expect('session-new', undefined)
+  assert.deepEqual(binding.inspect(), [])
+})
+
+test('dispose unsubscribes and forgets what was waiting', () => {
+  const stub = creationContext()
+  const binding = createCreationBinding({ ctx: stub.ctx })
+  binding.expect('session-new', pinned)
+  binding.dispose()
+  assert.equal(stub.wired, false, 'the listener is gone')
+  assert.deepEqual(binding.inspect(), [])
+})
+
+test('a context without `on` still returns a usable, inert binding', () => {
+  const binding = createCreationBinding({ ctx: {} })
+  binding.expect('session-new', pinned)
+  assert.equal(binding.inspect().length, 1, 'recording works')
+  binding.dispose()
+  assert.deepEqual(binding.inspect(), [])
+})
+

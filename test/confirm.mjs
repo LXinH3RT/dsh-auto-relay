@@ -1,15 +1,25 @@
 // Did the continuation session actually start working?
 //
-// The behaviour under test is the one that failed on a real machine: the relay
-// session was created, its first model call died with `UNKNOWN_MODEL`, and
-// nothing noticed. The distinction that matters is between
+// The behaviour under test is the one that failed on a real machine, twice. The
+// first relay died with `UNKNOWN_MODEL` and nothing noticed. After that was
+// fixed the bookkeeper still could not tell the difference between "a call was
+// dispatched" and "the model answered" — it counted `step/start` as proof, and on
+// the second failure the successor logged `step/start` at +1544 ms, a FAILING
+// `assistant/attempt` at +1560 ms, and the fatal `turn/end{kind:'error'}` at
+// +1561 ms. The relay had been written off as healthy one millisecond before the
+// error arrived, so the rescue never ran.
+//
+// The distinctions that matter now are:
 //
 //   * silence  — no event at all: reported, never treated as failure;
-//   * proof    — `step/start`, an assistant message, or a tool call: settled;
+//   * proof    — an assistant message or a tool call: the model answered;
 //   * failure  — the FIRST turn ends in error before any proof: rescued.
 //
-// A later failure (an error in a second turn, after the session demonstrably
-// ran) is an ordinary turn failure and must be ignored.
+// Dispatch-order events (`step/start`, `assistant/attempt`) are deliberately NOT
+// proof: they fire on the way to a failure too.
+//
+// An error arriving after a proof is an ordinary turn failure: by then the relay
+// is no longer watched, so nothing is reported and nothing is rescued.
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
@@ -48,25 +58,65 @@ function session(id) {
   return { id }
 }
 
-test('the proof events are the ones that mean a model call was dispatched', () => {
+/** The turn/end payload for a failed first turn. */
+function errorTurn(message, code) {
+  return { type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: { message, code } } } }
+}
+
+test('the proof events are the ones that mean the model answered', () => {
   assert.deepEqual(
     [...PROOF_EVENTS].sort(),
-    ['assistant/attempt', 'assistant/message', 'step/start', 'tool/call'],
-    'the set is exactly the dispatch evidence',
+    ['assistant/message', 'tool/call'],
+    'a dispatched call is not proof: step/start and assistant/attempt fire before a failure too',
   )
 })
 
-test('a step start proves the successor is running', () => {
+test('an assistant message proves the successor is running', () => {
   const h = harness()
   h.confirm.track({ parentId: 'session-old', childId: 'session-new' })
   assert.equal(h.confirm.isPending('session-new'), true)
-  assert.equal(h.confirm.handleEvent(session('session-new'), { type: 'step/start' }), 'proved')
+  assert.equal(h.confirm.handleEvent(session('session-new'), { type: 'assistant/message' }), 'proved')
   assert.equal(h.confirm.isPending('session-new'), false, 'a proved relay is no longer watched')
   assert.equal(h.failed.length, 0, 'nothing to rescue')
   assert.equal(h.logs.length, 1, 'the proof is logged')
 })
 
-test('a completed first turn counts as proof even without a step event', () => {
+test('a tool call proves the successor is running', () => {
+  const h = harness()
+  h.confirm.track({ parentId: 'session-old', childId: 'session-new' })
+  assert.equal(h.confirm.handleEvent(session('session-new'), { type: 'tool/call' }), 'proved')
+  assert.equal(h.failed.length, 0)
+})
+
+test('a dispatched step is never proof on its own', () => {
+  // The regression: this returned 'proved' and silently disarmed the rescue.
+  const h = harness()
+  h.confirm.track({ parentId: 'session-old', childId: 'session-new' })
+  assert.equal(h.confirm.handleEvent(session('session-new'), { type: 'step/start' }), null, 'not proof')
+  assert.equal(h.confirm.handleEvent(session('session-new'), { type: 'assistant/attempt' }), null, 'not proof either')
+  assert.equal(h.confirm.isPending('session-new'), true, 'the relay is still being watched')
+})
+
+test('a failing attempt followed by the fatal turn still fails the relay', () => {
+  // The exact observed order, in miniature.
+  const h = harness()
+  h.confirm.track({ parentId: 'session-old', childId: 'session-new', drained: [{ id: 'm1' }] })
+  h.confirm.handleEvent(session('session-new'), { type: 'step/start' })
+  h.confirm.handleEvent(session('session-new'), {
+    type: 'assistant/attempt',
+    data: { finish: { reason: 'error' } },
+  })
+  const verdict = h.confirm.handleEvent(
+    session('session-new'),
+    errorTurn('llm-deepseek: no API key for provider route "deepseek-official"', 'MISSING_CREDENTIAL'),
+  )
+  assert.equal(verdict, 'failed', 'the rescue is not disarmed by dispatch events')
+  assert.equal(h.failed.length, 1)
+  assert.deepEqual(h.failed[0].record.drained, [{ id: 'm1' }], 'the drained queue travels to the rescue')
+  assert.equal(h.failed[0].detail.code, 'MISSING_CREDENTIAL')
+})
+
+test('a completed first turn counts as proof even without a message', () => {
   const h = harness()
   h.confirm.track({ parentId: 'session-old', childId: 'session-new' })
   const verdict = h.confirm.handleEvent(session('session-new'), {
@@ -80,13 +130,10 @@ test('a completed first turn counts as proof even without a step event', () => {
 test('a first turn that errors before any proof is a failed relay', () => {
   const h = harness()
   h.confirm.track({ parentId: 'session-old', childId: 'session-new', drained: [{ id: 'm1' }] })
-  const verdict = h.confirm.handleEvent(session('session-new'), {
-    type: 'turn/end',
-    data: {
-      turn: 1,
-      reason: { kind: 'error', error: { message: 'pi-ai provider "workbuddy" has no configured model "hy4free"', code: 'UNKNOWN_MODEL' } },
-    },
-  })
+  const verdict = h.confirm.handleEvent(
+    session('session-new'),
+    errorTurn('pi-ai provider "workbuddy" has no configured model "hy4free"', 'UNKNOWN_MODEL'),
+  )
   assert.equal(verdict, 'failed')
   assert.equal(h.failed.length, 1, 'the rescue ran')
   const { record, detail } = h.failed[0]
@@ -98,27 +145,26 @@ test('a first turn that errors before any proof is a failed relay', () => {
   assert.equal(h.confirm.isPending('session-new'), false, 'a failed relay is no longer watched')
 })
 
-test('an error after the session already ran is an ordinary turn failure', () => {
+test('an error after the session already answered is an ordinary turn failure', () => {
   const h = harness()
   h.confirm.track({ parentId: 'session-old', childId: 'session-new' })
-  h.confirm.handleEvent(session('session-new'), { type: 'tool/call' })
-  // Re-track, as a second relay would; then the session errors mid-work.
-  h.confirm.track({ parentId: 'session-old', childId: 'session-2' })
-  h.confirm.handleEvent(session('session-2'), { type: 'step/start' })
-  const verdict = h.confirm.handleEvent(session('session-2'), {
-    type: 'turn/end',
-    data: { turn: 1, reason: { kind: 'error', error: { message: 'context exceeded', code: 'CONTEXT_OVERFLOW' } } },
-  })
-  assert.equal(verdict, null, 'a proved relay never reports failure')
+  assert.equal(h.confirm.handleEvent(session('session-new'), { type: 'assistant/message' }), 'proved')
+  // A later error in the same session is now just conversation noise: the relay
+  // was settled when the model answered, so the bookkeeper has nothing to say.
+  const verdict = h.confirm.handleEvent(
+    session('session-new'),
+    { type: 'turn/end', data: { turn: 2, reason: { kind: 'error', error: { message: 'context exceeded', code: 'CONTEXT_OVERFLOW' } } } },
+  )
+  assert.equal(verdict, null, 'a settled relay never reports failure')
   assert.equal(h.failed.length, 0)
 })
 
 test('events of sessions it is not watching are ignored', () => {
   const h = harness()
   h.confirm.track({ parentId: 'session-old', childId: 'session-new' })
-  assert.equal(h.confirm.handleEvent(session('session-other'), { type: 'step/start' }), null)
+  assert.equal(h.confirm.handleEvent(session('session-other'), { type: 'assistant/message' }), null)
   assert.equal(h.confirm.handleEvent(session('session-new'), { type: 'session/title' }), null)
-  assert.equal(h.confirm.handleEvent(undefined, { type: 'step/start' }), null)
+  assert.equal(h.confirm.handleEvent(undefined, { type: 'assistant/message' }), null)
   assert.equal(h.confirm.isPending('session-new'), true, 'an unrelated event does not settle the relay')
 })
 

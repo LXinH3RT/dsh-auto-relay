@@ -289,7 +289,8 @@ window.__ModuleLoader__.load({
       'field.maxQueueItems': 'Maximum carried messages',
       'hint.maxQueueItems': 'Messages beyond this stay in the old session; they are not removed.',
       'field.checkRelayModel': 'Check the model before relaying',
-      'hint.checkRelayModel': 'A relay that cannot resolve its model dies on the first call. When resolution fails the hand-off is skipped with a warning; an inconclusive probe still relays.',
+      'hint.checkRelayModel':
+        'Checks the route the successor\'s first request will actually carry — the configured one when a pair is set, otherwise the profile default. A route that cannot resolve skips the hand-off with a warning; an inconclusive probe still relays.',
       'field.relayTimeoutSeconds': 'Silence warning (s)',
       'hint.relayTimeoutSeconds': 'Reported when the new session shows no activity at all for this long. Silence is never treated as failure.',
       'field.relayProvider': 'Provider for the relay session',
@@ -362,7 +363,8 @@ window.__ModuleLoader__.load({
       'field.maxQueueItems': '最多携带多少条',
       'hint.maxQueueItems': '超出这个数的排队输入留在旧会话里，不会被移除。',
       'field.checkRelayModel': '接力前先检查模型',
-      'hint.checkRelayModel': '模型解析不了的接力会话第一轮就会失败。解析失败时跳过本次接力并告警；探测不出结论时照常接力。',
+      'hint.checkRelayModel':
+        '检查的是接力会话第一次请求真正会带的路由——填了模型就看指定的那条，没填就看 profile 默认那条。解析不了时跳过本次接力并告警；探测不出结论时照常接力。',
       'field.relayTimeoutSeconds': '静默告警（秒）',
       'hint.relayTimeoutSeconds': '新会话在这段时间内完全没有动静就发出警告。静默不会被当成失败。',
       'field.relayProvider': '接力会话的提供方',

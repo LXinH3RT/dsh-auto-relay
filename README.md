@@ -45,7 +45,7 @@ Open **Settings → Plugins**, then open this plugin's page or its row: every fi
 | `carryQueue` | `true` | Send input still waiting in the old queue to the new session |
 | `maxQueueChars` | `6000` | Character bound on carried input (`0` = no bound) |
 | `maxQueueItems` | `20` | Message bound on carried input (1–200) |
-| `checkRelayModel` | `true` | Check that the continuation's model resolves before handing off |
+| `checkRelayModel` | `true` | Check that the route the continuation's first request will actually carry resolves |
 | `relayTimeoutSeconds` | `120` | How long to wait for any sign of activity (10–3600 s); silence is only reported |
 | `relayProvider` | empty | Provider for the continuation session; empty inherits the one the previous session is running on |
 | `relayModel` | empty | Model for the continuation session; empty inherits the previous session's model |
@@ -71,13 +71,15 @@ With `archiveOldSession` on, the handing-off session is stopped once the continu
 
 ## When the relay fails
 
-Creating the successor is not the same as it running. The plugin tracks each relay session's first turn: a `step/start`, `assistant/message`, `assistant/attempt` or `tool/call`, or a first turn that ends without an error, all count as success. Only **an error on that first turn** is treated as a failed relay. On failure the predecessor is taken back out of the archive, the carried input is handed back to its queue, and the old session can continue — with a warning recorded.
+Creating the successor is not the same as it running. The plugin tracks each relay session's first turn: only an **answer from the model** counts as success — an `assistant/message`, a `tool/call`, or a first turn that ends without an error. Only **an error on that first turn before any answer** is treated as a failed relay. On failure the predecessor is taken back out of the archive, the carried input is handed back to its queue, and the old session can continue — with a warning recorded.
 
-That matches an observed failure: the successor was created and the task was delivered, but its very first model call rejected because the model name no longer resolved, by which time the old session had already handed the work over.
+The bar deliberately excludes `step/start` and `assistant/attempt`: both are emitted on the way to a failure. The failure actually observed ran `step/start` (+1544 ms) → a failing `assistant/attempt` (+1560 ms) → the fatal `turn/end{kind:'error'}` (+1561 ms). Counting either as success wrote the relay off as healthy one millisecond before the error arrived, so the rescue never ran.
+
+That matches two observed failures: the successor was created and the task was delivered, but its very first model call rejected — once because the model name no longer resolved (`UNKNOWN_MODEL`), once because the route had no credential (`MISSING_CREDENTIAL`) — by which time the old session had already handed the work over.
 
 `relayTimeoutSeconds` is only a waiting bound: exceeding it with no activity records a note and **never** rolls anything back — the relay may simply be waiting for the delivery floor, and undoing a healthy hand-off would be worse than saying nothing.
 
-Before creating anything the plugin also asks the LLM registry whether the continuation's model resolves. A route that cannot resolve skips the hand-off with a warning instead of creating a session that is certain to fail on its first call. Only a definite resolution failure blocks it: a missing registry, a missing selection, or a probe that fails for any other reason relays as usual (`checkRelayModel` turns the whole check off).
+Before creating anything the plugin also asks the LLM registry whether **the route the successor's first request will actually carry** resolves: the configured one when a pair is set, otherwise the profile default, because that is what the first call hits. A route that cannot resolve skips the hand-off with a warning instead of creating a session that is certain to fail. Only a definite resolution failure blocks it: a missing registry, a missing selection, or a probe that fails for any other reason relays as usual (`checkRelayModel` turns the whole check off).
 
 ## Which model the continuation runs on
 
@@ -85,9 +87,11 @@ The relay task cannot carry a model — `new_once` accepts only a working direct
 
 So these three fields **inherit the route the previous session is running on** when left empty: provider, model, and reasoning effort all come from the header the handing-off session recorded (falling back to its last resolved request context). That order is measured, not guessed — `request/header` carries `reasoningEffort` and `request/context` does not, so the header is read first.
 
-Filling in `relayProvider` and `relayModel` (optionally `relayReasoningEffort`) pins that route onto the successor as soon as it appears. The pin uses `agent.model.select`, so it **does not** rewrite your global default model — that belongs to the model picker, not to a relay plugin acting on your behalf.
+Filling in `relayProvider` and `relayModel` (optionally `relayReasoningEffort`) pins that route onto the successor the instant the session is created: the plugin hooks `agent/created`, which the agent factory awaits after the session is entered but before the loop's first turn, so the selection is in the log before any request is built. The pin uses `agent.model.select`, so it **does not** rewrite your global default model — that belongs to the model picker, not to a relay plugin acting on your behalf.
 
-Half a pair is not a choice: an incomplete route pins nothing and the inherited route is used. Pinning is best-effort in any case: the successor only exists once the delivery creates it, so a session that never appears inside the wait window is given up on, the hand-off itself is unaffected, and `checkRelayModel` remains the real guard.
+That hook is the mechanism, not an optimisation. `model/selection` only affects the **next** request — the projection records it as pending until the following `request/header` retires it — and the successor goes from creation to its first request in about 1.5 seconds. The earlier approach (wait for the session to appear, then select) landed 4 milliseconds after the very `request/header` it was supposed to prevent, so the first call still ran on the wrong model. The polling path is kept as a second net for a session the hook somehow never saw.
+
+Half a pair is not a choice: an incomplete route pins nothing and the inherited route is used.
 
 ## Title increment
 

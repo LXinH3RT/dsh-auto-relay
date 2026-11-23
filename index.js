@@ -43,7 +43,7 @@ import { createWatcher, occupancy } from './lib/watch.js'
 import { preflightModel } from './lib/preflight.js'
 import { drainQueue, readInbox, renderQueue, renderedCount, restoreQueue } from './lib/queue.js'
 import { createConfirm } from './lib/confirm.js'
-import { bindRelayModel, runningSelection, selectionOf } from './lib/model.js'
+import { bindRelayModel, createCreationBinding, runningSelection, selectionOf } from './lib/model.js'
 
 export const name = 'dsh-auto-relay'
 
@@ -225,7 +225,8 @@ function defineConfig(Schema) {
     checkRelayModel: Schema.boolean()
       .default(DEFAULTS.checkRelayModel)
       .description(
-        '接力前先确认新会话要用的模型在当前配置里能解析。模型名失效时跳过本次接力并告警，' +
+        '接力前先确认新会话第一次请求真正会带的路由能解析——指定了模型时看指定的那条，' +
+        '没指定时看新会话按 profile 默认会用哪条（那才是首枪会撞上的）。解析不了就跳过本次接力并告警，' +
         '而不是开出一个第一轮就报错的新会话。探测不出结果时照常接力。',
       )
       .volatile(),
@@ -338,6 +339,24 @@ export function apply(ctx, settings = {}) {
     reported.add(message)
     warn(message)
   }
+
+  /**
+   * Write the relay route from `agent/created`, before the successor's first call.
+   *
+   * This is the mechanism, not an optimization. `new_once` reservations carry no
+   * model, so a successor is created on the profile default, and `model/selection`
+   * only takes effect on the NEXT request — a poll that notices the session after
+   * it exists (about 1.5 s later) loses that race by a few milliseconds, which is
+   * exactly how one relay died on a route it was supposed to be pinned away from.
+   * The agent factory awaits `agent/created` while the agent is entered but before
+   * the loop's first turn, so a selection written here is already in the log when
+   * `model.current()` is read.
+   */
+  const creationBinding = createCreationBinding({ ctx, log, warn: warnOnce })
+
+  ctx.effect(() => () => {
+    creationBinding.dispose()
+  }, 'dsh-auto-relay: relay model binding')
 
   /** The current title, or undefined when no title service or no title exists. */
   function readTitle(session) {
@@ -495,10 +514,15 @@ export function apply(ctx, settings = {}) {
     // a machine-wide setting that a picker selection never touches.
     const pinned = selectionOf(config.relayProvider, config.relayModel, config.relayReasoningEffort)
       ?? runningSelection(session)
-    // Ask before creating anything: a continuation whose model cannot resolve
-    // dies on its first call, and that failure is far more expensive than this
-    // one lookup (see `lib/preflight.js`).
-    const check = await preflightModel(ctx, session, { enabled: config.checkRelayModel, selection: pinned })
+    // Ask before creating anything, about the route the successor's FIRST request
+    // will carry. With the creation hook armed that is `pinned`; without it the
+    // first request runs on the profile default and the pinned route only applies
+    // afterwards, so probing `pinned` would answer a question nobody asked.
+    const check = await preflightModel(ctx, session, {
+      enabled: config.checkRelayModel,
+      selection: pinned,
+      binding: pinned !== null,
+    })
     if (!check.ok) {
       throw new Error(`接力被跳过：${check.reason ?? '模型不可用'}`)
     }
@@ -550,11 +574,17 @@ export function apply(ctx, settings = {}) {
         // cleared by the cancel before it was ever read.
         carried: carry?.count ?? 0,
       })
-      // The reservation cannot carry a model, so the inherited (or pinned) route
-      // is applied as soon as the delivery creates the session. This runs
-      // detached: waiting for a session that may take a minute to appear must not
-      // hold up the hand-off.
+      // The reservation cannot carry a model, so the route is applied the instant
+      // the delivery creates the session — from `agent/created`, which the factory
+      // awaits before the loop's first turn. The expectation is registered here,
+      // synchronously after the reservation, so it is in place long before the
+      // delivery can run (its floor is a second at minimum).
       if (pinned !== null) {
+        creationBinding.expect(sessionId, pinned)
+        // A second, weaker net for a session that somehow appears without the
+        // creation hook noticing (a resumed delivery, or a host that announced it
+        // late). It cannot win the first-request race, but it still pins a
+        // successor that has not called yet.
         void bindRelayModel(ctx, sessionId, pinned, { log, warn: warnOnce }).catch((error) => {
           warnOnce(`dsh-auto-relay: 为接力会话指定模型失败 — ${String(error?.message ?? error)}`)
         })

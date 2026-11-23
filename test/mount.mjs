@@ -666,10 +666,11 @@ test('a successor whose first turn errors is reported and the parent is restored
   stub.dispose()
 })
 
-test('a successor that produced a step is never rolled back', async () => {
-  // Once the successor has a step or a message it is doing work; a later error is
-  // the model's business, not a broken hand-off.
-  const stub = stubContext({ percent: 62, queue: [queued('q1', '别还回去')], registry: true })
+test('a successor that dispatched a step but never answered is still rolled back', async () => {
+  // This is the shape that used to slip through. A dead first turn logs
+  // `step/start` (and a failing `assistant/attempt`) BEFORE the fatal `turn/end`,
+  // so treating either as proof disarmed the rescue exactly one event early.
+  const stub = stubContext({ percent: 62, queue: [queued('q1', '必须还回去')], registry: true })
   apply(stub.ctx, { consecutiveCount: 1 })
   stub.emit('session/event', session, start('c1'))
   stub.emit('session/event', session, end('c1'))
@@ -677,6 +678,28 @@ test('a successor that produced a step is never rolled back', async () => {
 
   const child = { id: 'session-new-1', header: { cwd: '/repo' } }
   stub.emit('session/event', child, { type: 'step/start', seq: 4, time: 0, data: { turn: 1, step: 1 } })
+  stub.emit('session/event', child, failedTurn({
+    message: 'llm-deepseek: no API key for provider route "deepseek-official"',
+    code: 'MISSING_CREDENTIAL',
+  }))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.deepEqual(stub.unarchived, ['session-a'], 'dispatching a call is not proof of life')
+  assert.equal(stub.prepended.length, 1, 'the queued message comes back')
+  stub.dispose()
+})
+
+test('a successor that answered is never rolled back', async () => {
+  // Once the model has answered, a later error is the conversation's business,
+  // not a broken hand-off.
+  const stub = stubContext({ percent: 62, queue: [queued('q1', '别还回去')], registry: true })
+  apply(stub.ctx, { consecutiveCount: 1 })
+  stub.emit('session/event', session, start('c1'))
+  stub.emit('session/event', session, end('c1'))
+  await new Promise((resolve) => setImmediate(resolve))
+
+  const child = { id: 'session-new-1', header: { cwd: '/repo' } }
+  stub.emit('session/event', child, { type: 'assistant/message', seq: 4, time: 0, data: {} })
   stub.emit('session/event', child, failedTurn({ message: 'quota exceeded', code: 'QUOTA' }))
   await new Promise((resolve) => setImmediate(resolve))
 
